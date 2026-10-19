@@ -277,3 +277,28 @@ código em `runtime/hle/wildbattle.c`; opção "Batalhas selvagens (experimental
   minutos o que três rodadas manuais não mostraram. (3) O `LARECOMP_HOOK_DUMP` exige o endereço completo do guest.
 - **Falta:** XP dividido (metade ao derrotar, metade ao capturar), natureza e shiny do Pokémon tocado, formas
   regionais (a tabela de golpes usa o índice da espécie), batalha de Pokémon grandes/auras e teste em mais áreas.
+
+## Texto em 2x com riscos verticais (19/10/2026, PR #13 do Vancete)
+- **Sintoma.** Com o cache de glifos em 2x (`runtime/hle/font_hires.c`, ligado sozinho a partir de 1080 linhas), o menu
+  "Continue your adventure" mostrava riscos claros e finos entre as letras; com `LARECOMP_FONT_SCALE=1` não havia nada.
+- **Diagnóstico.** Saturar a subtração do preenchimento (fontes com contorno) não mudou nada. Os riscos ficavam nas
+  bordas das células: a célula em Kx era escrita de `cx*K + 1` até `(cx+cw+2)*K - 1`, deixando a primeira e a última
+  coluna como estavam.
+- **Causa.** Quando o jogo reaproveita uma célula, essas colunas guardavam pedaços do glifo que estava ali antes. Em 1x
+  o jogo reescreve a célula inteira (as colunas vazias também).
+- **Correção.** A célula em Kx cobre exatamente K vezes a de 1x (`cl = cx*K`, `cr = (cx+cw+2)*K`). Conferido em tela
+  cheia 1080p (2x automático) no Eevee: sem riscos.
+
+## Interface 2x com ícones em lixo no Pikachu (19/10/2026)
+- **Sintoma.** Teste de paridade do PR #13: no Pikachu, com `ui2x = 1`, os ícones do menu X saíam como ruído e o ícone
+  do parceiro sumia; com `ui2x = 0`, normal. No Eevee a mesma comparação saía certa.
+- **Diagnóstico.** O Pikachu com o pacote gerado no Eevee ficava normal: o defeito estava no pacote. As interfaces dos
+  dois jogos têm as mesmas 3081 texturas (mesmas chaves), mas os dados das 3081 diferiam. Gerar de novo no Eevee dava
+  um pacote idêntico (é determinístico), e numa pasta de teste ligada aos arquivos do Eevee também. Gerar de novo no
+  Pikachu deu o pacote certo, idêntico ao do Eevee. Ou seja, foi uma falha isolada: naquela vez o waifu2x terminou em
+  37 s em vez de ~72 s, saiu com código 0 e entregou lixo em todas as imagens (1 em 7 gerações, RTX 3080).
+- **Causa.** O empacotamento (`runtime/ui2x.c`, `pack`) aceitava qualquer saída do waifu2x com o tamanho certo.
+- **Correção.** Cada imagem 2x, reduzida a 1x pela média de 2x2, é comparada com a entrada do waifu2x (cor e alfa).
+  Diferença média acima de 16 (0..255): a imagem fica de fora. Mais de 10% de fora: não sai pacote, e a tela inicial
+  diz que o ampliador falhou e para tentar de novo. Medido: imagens boas até 7,2; o lixo da falha entre 66 e 188.
+  Três gerações seguidas com a conferência: 0 imagens de fora.

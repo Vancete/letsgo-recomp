@@ -473,6 +473,31 @@ static void extract_arc(FILE *f, const char *path, uint64_t off, uint64_t size, 
 }
 
 // ================================================================== step 4: compressed into the pack
+// How far a 2x image (stride bytes a texel, its first nc channels compared), taken back down to 1x (2x2 averages), is
+// from waifu2x's input: the mean absolute difference, 0..255 (-1: the input can't be read). waifu2x sometimes exits 0
+// with garbage for every image (once in seven runs, RTX 3080: in half the time) - a pack of it drew the menus as noise.
+// Measured: good images up to 7.2, that garbage 66 to 188.
+static double back_down_error(const char *in_path, const uint8_t *out, int w, int h, int stride, int nc) {
+    int iw, ih, ic;
+    uint8_t *in = stbi_load(in_path, &iw, &ih, &ic, 3);
+    if (!in || iw * 2 != w || ih * 2 != h) { stbi_image_free(in); return -1; }
+    uint64_t sum = 0;
+    for (int y = 0; y < ih; y++)
+        for (int x = 0; x < iw; x++)
+            for (int c = 0; c < nc; c++) {
+                const uint8_t *o = out + ((size_t)(y * 2) * w + x * 2) * stride + c;
+                int avg = (o[0] + o[stride] + o[(size_t)w * stride] + o[(size_t)w * stride + stride] + 2) / 4;
+                int d = avg - in[((size_t)y * iw + x) * 3 + c];
+                sum += (uint64_t)(d < 0 ? -d : d);
+            }
+    stbi_image_free(in);
+    return (double)sum / ((double)iw * ih * nc);
+}
+#define BACK_DOWN_MAX 16.0
+
+static uint32_t g_rejected;  // images whose 2x version didn't match (left out of the pack)
+static double g_err_max;     // the largest difference of an image kept
+
 static bool pack(void) {
     char tmp[] = PAK ".tmp";
     FILE *f = fopen(tmp, "wb");
@@ -493,15 +518,22 @@ static bool pack(void) {
         uint8_t *px = stbi_load(path, &w, &h, &c, 4);
         if (!px) continue;
         if ((uint32_t)w != it->w * 2 || (uint32_t)h != it->h * 2) { stbi_image_free(px); continue; }
+        snprintf(path, sizeof path, WORK "/in/%016llx.png", (unsigned long long)it->key);
+        double err = back_down_error(path, px, w, h, 4, 3);
         bool opaque = true;
         if (it->alpha) {  // (its alpha, upscaled as an image of its own)
             snprintf(path, sizeof path, WORK "/out/%016llx_a.png", (unsigned long long)it->key);
             int aw, ah, ac;
             uint8_t *a = stbi_load(path, &aw, &ah, &ac, 1);
             if (!a || aw != w || ah != h) { stbi_image_free(a); stbi_image_free(px); continue; }
+            snprintf(path, sizeof path, WORK "/in/%016llx_a.png", (unsigned long long)it->key);
+            double ea = back_down_error(path, a, w, h, 1, 1);  // (the input is grey: its R is the alpha)
+            err = ea < 0 ? -1 : err > ea ? err : ea;
             for (size_t k = 0; k < (size_t)w * h; k++) px[k * 4 + 3] = a[k], opaque &= a[k] == 255;
             stbi_image_free(a);
         }
+        if (err < 0 || err > BACK_DOWN_MAX) { g_rejected++; stbi_image_free(px); continue; }
+        if (err > g_err_max) g_err_max = err;
         int fmt = it->ch == 1 ? UI2X_BC4 : it->ch == 2 ? UI2X_BC5 : opaque ? UI2X_BC1 : UI2X_BC3;
         uint32_t bpb = fmt == UI2X_BC1 || fmt == UI2X_BC4 ? 8 : 16, wb = ((uint32_t)w + 3) / 4, hb = ((uint32_t)h + 3) / 4;
         uint64_t size = (uint64_t)wb * hb * bpb;
@@ -529,7 +561,10 @@ static bool pack(void) {
         off += size;
     }
     hdr[1] = n;
-    bool ok = n > 0 && !fseeko(f, 4, SEEK_SET) && fwrite(hdr, 4, 3, f) == 3 && fwrite(e, sizeof *e, n, f) == n;
+    LOG("[ui2x] back down to 1x: %u of %u images off by more than %.0f (left out), the largest kept %.2f\n",
+        g_rejected, g_nitems, BACK_DOWN_MAX, g_err_max);
+    // (many off: waifu2x's output as a whole is broken - no pack, the start screen says to try again)
+    bool ok = n > 0 && g_rejected <= g_nitems / 10 && !fseeko(f, 4, SEEK_SET) && fwrite(hdr, 4, 3, f) == 3 && fwrite(e, sizeof *e, n, f) == n;
     ok = !fclose(f) && ok;
     free(e);
     if (!ok) { remove(tmp); return false; }
@@ -607,7 +642,8 @@ static void *generate_thread(void *unused) {
     }
     // 4: the pack
     g_state = UI2X_PACKING, g_progress = 0;
-    if (!pack()) { g_state = UI2X_FAIL_FILES; goto done; }
+    g_rejected = 0, g_err_max = 0;
+    if (!pack()) { g_state = g_rejected > g_nitems / 10 ? UI2X_FAIL_UPSCALER : UI2X_FAIL_FILES; goto done; }
     plat_remove_tree(WORK);
     LOG("[ui2x] done in %.1f s\n", (plat_now_ns() - t0) / 1e9);
     g_state = UI2X_DONE, g_progress = 1;

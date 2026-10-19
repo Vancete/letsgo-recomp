@@ -61,6 +61,17 @@
   (present, image acquire, async compute; RTX 5070 Ti: families 0, 1 and 2). Without a free queue or the DLL, the
   driver's swapchain is used as before. Tested in Pallet Town at 30 and 60 fps with FSR 3.1, TAA, SSAO and GI, and in
   full screen at 4K (the swapchain made again): same images, same frame pacing.
+
+## 0.4.0 (2026-10-19)
+
+- **Fixes the world drawn wrong after a catch** (0.3.2): black trees with yellow stripes, bushes with a sign's texture
+  or a flat colour, and no dirt path until the area changed. After a catch the game loads shaders again at addresses
+  that held other shaders, and the renderer handed back the old translations; shaders are now known by their content
+  too. Checked with automatic catch loops: 7 catches on Eevee and 9 on Pikachu.
+- **2x interface checked before it is packed**: waifu2x once (in seven runs) exited normally with garbage for every
+  image, and the menus' icons came out as noise. Each 2x image, taken back down to 1x, must now match the original
+  (good ones differ by up to 7 of 255, that garbage by 66 or more); with more than 10% off, no pack is written and the
+  start screen says to try again.
 - **Fixes many 2x interface images showing wrong** (partly or wholly transparent): waifu2x-ncnn-vulkan 20250915
   loses the alpha of an RGBA image outside its last tiles (a fully opaque 512x288 image came out 25/32 transparent).
   Images are now upscaled as RGB only - with transparency, their colour and their alpha (as a grey image) separately,

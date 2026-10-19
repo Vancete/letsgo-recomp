@@ -56,7 +56,8 @@ jogo. O programa abre em portugues quando o Windows esta em portugues.
 Controls
 --------
 Keyboard: WASD walk, Space/Enter = A, Q/Backspace = B, Tab = X (menu), R = Y, Z/C = L/R, = and - = Plus/Minus,
-arrows = D-pad, Esc = close. All keys can be changed on the start screen.
+arrows = D-pad, Esc = close, F12 = settings (volume, image, effects; on a controller: - and + together, then Settings).
+All keys can be changed on the start screen.
 Mouse: aims Poke Balls (like the Switch's motion controls), left button throws; outside of aiming, the left button is
 a finger on the touch screen (Play with your partner). Right button = B.
 Controllers: any controller SDL recognizes (Xbox, PlayStation, Switch Pro...), handheld-mode layout. The right stick

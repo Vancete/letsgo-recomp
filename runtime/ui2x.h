@@ -21,7 +21,7 @@ enum {
     UI2X_DONE,
     // failures (ui2x_state)
     UI2X_FAIL_DOWNLOAD,   // no connection, or the download didn't match
-    UI2X_FAIL_UPSCALER,   // waifu2x didn't run (no Vulkan GPU it can use?) - details in lasrecomp.log
+    UI2X_FAIL_UPSCALER,   // waifu2x didn't run (no Vulkan GPU it can use?) or gave garbage - details in lasrecomp.log
     UI2X_FAIL_FILES,      // game files missing / disk full
 };
 void ui2x_generate_start(void);  // on a background thread; the start screen polls the state
