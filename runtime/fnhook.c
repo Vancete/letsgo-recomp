@@ -57,8 +57,11 @@ static void add_hook(uint64_t addr, FnHook fn) {
     if (!addr) return;
     uint32_t s = (uint32_t)((addr >> 2) * 0x9E3779B1u) & (NHOOK - 1);
     while (hooks[s].addr && hooks[s].addr != addr) s = (s + 1) & (NHOOK - 1);
-    hooks[s].addr = addr;
+    // (the function before the address: hooks are also added while the game runs - the F12 menu's frame rate - and a
+    // thread looking the slot up must not find the address without its function)
     hooks[s].fn = fn;
+    atomic_thread_fence(memory_order_release);
+    hooks[s].addr = addr;
     g_fnhook = 1;
 }
 
@@ -77,6 +80,8 @@ add:
 }
 
 void rt_register_fnhook(uint64_t addr, FnHook fn) { reg(addr, fn, false); }
+// A hook at an address of the running build as it is (research: LARECOMP_STEP_SCALE, as LARECOMP_HOOK_DUMP's)
+void rt_register_fnhook_raw(uint64_t addr, FnHook fn) { reg(addr, fn, true); }
 
 void rt_fnhook_set_build(int build) {
     if (build == g_build) return;

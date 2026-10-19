@@ -7,7 +7,8 @@
 #      INPUT_EXTRA=",<frame>:<BUTTON>:<frames>,..." more input (STICK_RIGHT, STICK_DOWN, A, X...),
 #      SHOTS=<frame>,... game images (default 1600), LAST=<frame> window image and exit (default 1610),
 #      any other LARECOMP_* (LARECOMP_MV_DUMP, LARECOMP_SSAO_DUMP, LARECOMP_GPUPROF_AT...) passes through.
-# ini lines: e.g. "ssao = 1" "aa = taa" "upscaler = fsr3" "fsr3_preset = performance" (later lines win).
+# ini lines: e.g. "ssao_level = 3" "gi_level = 1" "aa = taa" "aa = fsr3" "fsr3_preset = performance" "frame_gen = 2"
+# (later lines win; "upscaler = fsr3" of older runs now means "aa = fsr3").
 # Results: $OUT/<name>/ (frame_N.png, window.png, dumps) and $OUT/<name>.log.
 # Note: run it on its own (not chained after make in the same command: the environment was lost that way), and it
 # opens a game window on the desktop for some seconds - do not close it.

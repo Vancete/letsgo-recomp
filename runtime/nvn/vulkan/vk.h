@@ -36,6 +36,12 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import;
+    // AMD's frame generation swapchain (fsr3.cpp fsr3_sc_*): its present, image acquire and async compute queues,
+    // created with the device when the DLL is there (ffx_ok); ffx_sc: the window's swapchain is AMD's now (frame
+    // generation or the setting ffx_swapchain: device.c ffx_wanted, switched at the next frame)
+    bool ffx_ok, ffx_sc;
+    VkQueue ffx_queue[3];
+    uint32_t ffx_fam[3];
     // window
     VkSurfaceKHR surface;
     VkSwapchainKHR swapchain;

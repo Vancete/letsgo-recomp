@@ -2,6 +2,65 @@
 
 ## Unreleased
 
+- **Fixes walking speed at 60 and 120 fps**: the player walked at ~85 % of the speed at 60 fps and ~53 % at 120. The
+  player moves by the walking animation's root motion (time-based) plus, once per world update, an offset of its own
+  (f_700021b6f0 of Pikachu 1.0.0: -2 cm while running, sized for a 33.3 ms update) - 60 cm/s off the animation's
+  450.8 at 30 fps, 120 at 60, 240 at 120. The same function turns the player toward the stick with a slerp of t = 0.5
+  per update, so turning was 2x / 4x as fast. Now, in the world at 60 / 120 fps, that offset is scaled by the update's
+  share of 33.3 ms and the slerp's t becomes 1 - (1 - t)^share. Measured in game time from the camera
+  (`tools/walk_speed.sh`): 391 cm/s at 30, 60 and 120 fps (before: 391 / 331 / 211). The functions are found by their
+  code near Pikachu 1.0.0's address (Eevee's should be a few instructions away - not tested). Found with new research
+  aids: `LARECOMP_CAM_LOG`, `LARECOMP_STEP_SCALE`, `LARECOMP_FARG_SCALE`, `LARECOMP_FIND_MOVER`, memwatch's
+  `LARECOMP_WATCH_LIKE` / `_AT` / `_MAX` (docs/DEPURACAO.md, docs/PESQUISA-60FPS.md).
+- **Frame rate limit in the F12 menu**: 30 fps (original) / 60 fps / 120 fps (experimental), switched while playing.
+  120 is the 60 fps mode with the world's step at 8.33 ms; menus stay at 30 with their in-between image (60), battles
+  and captures at 30. The mode's hooks are now added when it is first turned on (on the game thread; a hook's function
+  is written before its address, for threads looking it up meanwhile). The start screen's 60 fps box keeps 120 when on.
+  `larecomp.ini`: `fps = 120`.
+  - The player walked slower the higher the rate (85 % / 53 %): fixed, see "Fixes walking speed" above.
+- **Fixes the extreme ghosting of frame generation on vertical motion**: the present turns the game image upside down
+  (its origin is the lower left), and frame generation works on the window image - but it was given the depth and the
+  motion vectors the right way up. Sideways the two agree; up and down every vector pointed the wrong way, and the
+  generated frame doubled the whole scene vertically while walking up or down. Frame generation now gets them flipped
+  (the vectors' y and the jitter's negated). Checked on the generated frames alone, captured from the desktop while
+  walking down through Pallet Town (`tools/fg_walk.sh`). The F12 menu's frame generation is Off / 2x only now.
+- The post passes' pipeline cache had 16 entries for about 30 passes: with FSR 3.1, frame generation, SSAO and GI on,
+  some pipelines were made again every frame. 64 now.
+- **F12 menu reorganised**:
+  - **Anti-aliasing**: Off / SMAA / TAA / FSR 3.1. FSR 3.1 is the last choice instead of an upscaler of its own (with
+    its mode below it); with any other choice a lower render resolution is scaled bilinearly (FSR 1 is gone from the
+    menu; it stays as the fallback when FSR 3.1's DLL is missing). `larecomp.ini`: `aa = fsr3`; an older
+    `upscaler = fsr3` reads as it.
+  - **Frame generation**: Off / 2x, with FSR 3.1 anti-aliasing, switched live (AMD's swapchain is made or dropped at the
+    next frame; its queues are now created with the device whenever the DLL is there). FSR 3.1 generates one frame
+    between two (several is FSR 4's, DirectX 12 only). `frame_gen = 2`.
+  - **SSAO and GI**: quality levels Off (default) / Low / Medium / High instead of a box, and their parameters are gone
+    from the advanced page (its debug views stay, under Debug). High is what they had before. SSAO: 16 / 12 / 8 samples
+    (the shader takes the count now). GI: 4 rays x 8 steps at half the scene's size / 3 x 6 at half / 2 x 6 at a third.
+    The strength, reach and accumulation are the same at every level. 720p, RTX 5070 Ti, both on: +0.21 / +0.19 / +0.17
+    ms. `ssao_level`, `gi_level` (0-3); an older `ssao = 1` / `gi = 1` reads as high.
+- **FSR 3.1 frame generation** (`frame_gen = 1` in `larecomp.ini`, off by default; with the FSR 3.1 upscaler; read when
+  the game starts): AMD FidelityFX generates a frame between each two of the game's, on the swapchain below. At
+  `fps = 60` the window gets 120 images a second while playing, and 60 in menus and cutscenes (where the game runs at
+  30); the game's own in-between image of the 60 fps mode is off then. Interface excluded: the window image without the
+  interface (FSR 3's output where the interface mask is clear, the scene from before the interface where it is not) is
+  handed over each frame as FidelityFX's "HUD-less" image, so the interface is taken from the real frame and not warped.
+  The depth, the motion vectors and the jitter are FSR 3.1's. Where FSR 3.1 does not run (2D screens without the 3D
+  scene), no frame is generated. AMD's presenter thread keeps only the latest frame; two dropped in a row stalled the
+  GPU for good (1 run in 3 of the scripted turbo test, after a slow frame), so a present now waits until the presenter
+  has made one since the frame before (at most 100 ms; 18 turbo runs without a stall since).
+- **Fixes FSR 3.1's interface mask while playing**: the mask (the pixels the interface draws, which FSR 3.1 treats
+  apart) was taken only from draws into the presented image, but while playing the game draws its interface at the
+  render size into the image its last pass grades into the presented one - and the 2x interface images and the
+  high-resolution text read as the scene's (scaled) images. Now the copy is made of that image, and only a scaled render
+  target counts as the scene's.
+- **AMD FidelityFX swapchain, the first step towards frame generation** (`ffx_swapchain = 1` in `larecomp.ini`, off by
+  default; read when the game starts): the window's swapchain is FidelityFX's (SDK 1.1.4, the same signed
+  `amd_fidelityfx_vk.dll` as FSR 3.1). The game draws into FidelityFX's images and FidelityFX copies them into the real
+  swapchain on a present queue of its own. No frame is generated yet. The device gets three more queues for it
+  (present, image acquire, async compute; RTX 5070 Ti: families 0, 1 and 2). Without a free queue or the DLL, the
+  driver's swapchain is used as before. Tested in Pallet Town at 30 and 60 fps with FSR 3.1, TAA, SSAO and GI, and in
+  full screen at 4K (the swapchain made again): same images, same frame pacing.
 - **Fixes many 2x interface images showing wrong** (partly or wholly transparent): waifu2x-ncnn-vulkan 20250915
   loses the alpha of an RGBA image outside its last tiles (a fully opaque 512x288 image came out 25/32 transparent).
   Images are now upscaled as RGB only - with transparency, their colour and their alpha (as a grey image) separately,

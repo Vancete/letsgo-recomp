@@ -277,14 +277,3 @@ código em `runtime/hle/wildbattle.c`; opção "Batalhas selvagens (experimental
   minutos o que três rodadas manuais não mostraram. (3) O `LARECOMP_HOOK_DUMP` exige o endereço completo do guest.
 - **Falta:** XP dividido (metade ao derrotar, metade ao capturar), natureza e shiny do Pokémon tocado, formas
   regionais (a tabela de golpes usa o índice da espécie), batalha de Pokémon grandes/auras e teste em mais áreas.
-
-## Texto em 2x com riscos verticais (19/10/2026, PR #13 do Vancete)
-- **Sintoma.** Com o cache de glifos em 2x (`runtime/hle/font_hires.c`, ligado sozinho a partir de 1080 linhas), o menu
-  "Continue your adventure" mostrava riscos claros e finos entre as letras; com `LARECOMP_FONT_SCALE=1` não havia nada.
-- **Diagnóstico.** Saturar a subtração do preenchimento (fontes com contorno) não mudou nada. Os riscos ficavam nas
-  bordas das células: a célula em Kx era escrita de `cx*K + 1` até `(cx+cw+2)*K - 1`, deixando a primeira e a última
-  coluna como estavam.
-- **Causa.** Quando o jogo reaproveita uma célula, essas colunas guardavam pedaços do glifo que estava ali antes. Em 1x
-  o jogo reescreve a célula inteira (as colunas vazias também).
-- **Correção.** A célula em Kx cobre exatamente K vezes a de 1x (`cl = cx*K`, `cr = (cx+cw+2)*K`). Conferido em tela
-  cheia 1080p (2x automático) no Eevee: sem riscos.

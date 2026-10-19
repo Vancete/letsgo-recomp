@@ -75,6 +75,5 @@ Legal
 Fan project, not affiliated with Nintendo, The Pokemon Company, Game Freak or Creatures. MIT licensed (LICENSE.txt),
 based on LAS Recomp by Peiikai (LICENSE-LASRecomp.txt, https://github.com/peiikai/LASRecomp).
 Bundled: SDL3 (zlib), FFmpeg (LGPL 2.1, built with only the decoders the game needs; source: https://ffmpeg.org),
-shaderc (Apache 2.0), libiconv (LGPL), Zig (MIT), the Baloo 2 font (SIL OFL 1.1, Baloo2-OFL.txt),
-AMD's FidelityFX SDK runtime for FSR 3.1 (MIT, amd_fidelityfx_vk.dll, FidelityFX-LICENSE.txt), and the
+shaderc (Apache 2.0), libiconv (LGPL), Zig (MIT), the Baloo 2 font (SIL OFL 1.1, Baloo2-OFL.txt), and the
 GCC / MinGW-w64 runtime libraries (GPL with the runtime library exception).

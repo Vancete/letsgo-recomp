@@ -226,10 +226,9 @@ static void draw_hires(Cpu *c, uint64_t cache, uint64_t node, uint64_t tex, int 
     uint32_t flags = es >= 0 ? g_eng[es].flags : ~0u, ow = es >= 0 ? g_eng[es].outline : ~0u;
     pthread_mutex_unlock(&g_eng_lock);
 
-    // the K x cell: the low one's columns cx..cx+cw+1 (glyph from cx+1), rows ly..ly+lh (top-down) - all of them, its
-    // empty edge columns too: left as they were, a glyph that had used them before showed as thin vertical lines
+    // the K x cell: the low one's columns cx..cx+cw+1 (glyph from cx+1), rows ly..ly+lh (top-down)
     uint32_t KW = W * k, KH = H * k;
-    int cl = (int)(cx * k), cr = (int)((cx + cw + 2) * k), ct = (int)(ly * k), cb = (int)((ly + lh) * k);
+    int cl = (int)(cx * k) + 1, cr = (int)((cx + cw + 2) * k) - 1, ct = (int)(ly * k), cb = (int)((ly + lh) * k);
     if (cr > (int)KW) cr = (int)KW;
     if (cb > (int)KH) cb = (int)KH;
     int pen_x = (int)cx + 1 - t_first.lo_x, base_y = (int)ly + asc;  // the low glyph's pen origin, baseline (top-down)

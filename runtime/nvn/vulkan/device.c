@@ -14,6 +14,7 @@
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "vk.h"
+#include "fsr3.h"
 #include "../output_scale.h"
 #include "../renderer.h"
 
@@ -138,6 +139,61 @@ void vk_device_fault_report(void) {
             (unsigned long long)vend[i].vendorFaultData);
 }
 
+// AMD's frame generation swapchain (setting ffx_swapchain; LARECOMP_FFX_SWAPCHAIN=0/1 overrides it) needs three
+// queues besides the game's, picked as AMD's sample does: present (graphics + compute + present: it composes there),
+// image acquire (no capability needed: a transfer-only family first) and async compute (a compute-only family first).
+// Without a free queue for each, or without the DLL, the window keeps the driver's swapchain.
+static bool ffx_queues(void) {
+    const char *e = getenv("LARECOMP_FFX_SWAPCHAIN");
+    g_vk.ffx_ok = g_vk.ffx_sc = false;
+    if (e && atoi(e) == 0) return false;
+    if (!fsr3_available()) { LOG("[vk] no amd_fidelityfx_vk.dll: no frame generation\n"); return false; }
+    uint32_t nq = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, NULL);
+    VkQueueFamilyProperties qp[16];
+    if (nq > 16) nq = 16;
+    vkGetPhysicalDeviceQueueFamilyProperties(g_vk.phys, &nq, qp);
+    uint32_t left[16];
+    for (uint32_t i = 0; i < nq; i++) {
+        uint32_t c = qp[i].queueCount - (i == g_vk.qfam);  // (the game's queue is the first of its family)
+        left[i] = c > 15 ? 15 : c;
+    }
+    const VkQueueFlags GC = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
+    // per queue: the flags it needs, then the ones it should not have (relaxed on a second pass), and present support
+    struct { VkQueueFlags need, avoid; bool present; } want[3] = {
+        {GC, 0, true},                                       // present
+        {VK_QUEUE_TRANSFER_BIT, GC, false},                  // image acquire
+        {VK_QUEUE_COMPUTE_BIT, VK_QUEUE_GRAPHICS_BIT, false}  // async compute
+    };
+    for (int k = 0; k < 3; k++) {
+        g_vk.ffx_fam[k] = UINT32_MAX;
+        for (int pass = 0; pass < 2 && g_vk.ffx_fam[k] == UINT32_MAX; pass++)
+            for (uint32_t i = 0; i < nq; i++) {
+                VkBool32 pres = VK_TRUE;
+                if (want[k].present) vkGetPhysicalDeviceSurfaceSupportKHR(g_vk.phys, i, g_vk.surface, &pres);
+                if (!left[i] || !pres || (qp[i].queueFlags & want[k].need) != want[k].need) continue;
+                if (pass == 0 && (qp[i].queueFlags & want[k].avoid)) continue;
+                g_vk.ffx_fam[k] = i;
+                left[i]--;
+                break;
+            }
+        if (g_vk.ffx_fam[k] == UINT32_MAX) {
+            LOG("[vk] ffx_swapchain: no free queue for its %s, the normal swapchain\n", k == 0 ? "present" : k == 1 ? "image acquire" : "async compute");
+            return false;
+        }
+    }
+    g_vk.ffx_ok = true;
+    return true;
+}
+
+// AMD's swapchain is wanted now: frame generation (exec.c), the setting ffx_swapchain, LARECOMP_FFX_SWAPCHAIN=1
+static bool ffx_wanted(void) {
+    extern bool vk_fg_wanted(void);
+    const char *e = getenv("LARECOMP_FFX_SWAPCHAIN");
+    return g_vk.ffx_ok && ((e && atoi(e) != 0) || g_settings.ffx_swapchain || vk_fg_wanted());
+}
+bool vk_fg_available(void) { return g_vk.ffx_ok; }  // (the F12 menu)
+
 static void create_device(void) {
     uint32_t ne = 0;
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
@@ -208,13 +264,24 @@ static void create_device(void) {
     if (getenv("LARECOMP_NO_ROBUST")) b->robustBufferAccess = VK_FALSE;  // (research: what the bounds checks cost)
     b->shaderClipDistance = h->shaderClipDistance;
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
-    float prio = 1.0f;
-    VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
-                                  .queueCount = 1, .pQueuePriorities = &prio};
-    VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = 1,
-                             .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
+    static const float prio[16] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+    VkDeviceQueueCreateInfo qi[4] = {{.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
+                                      .queueCount = 1, .pQueuePriorities = prio}};
+    uint32_t nqi = 1, ffx_idx[3] = {0};
+    if (ffx_queues()) {  // (one create info per family, the queues numbered in it)
+        for (int k = 0; k < 3; k++) {
+            uint32_t i = 0;
+            while (i < nqi && qi[i].queueFamilyIndex != g_vk.ffx_fam[k]) i++;
+            if (i == nqi) qi[nqi++] = (VkDeviceQueueCreateInfo){.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                                                .queueFamilyIndex = g_vk.ffx_fam[k], .pQueuePriorities = prio};
+            ffx_idx[k] = qi[i].queueCount++;
+        }
+    }
+    VkDeviceCreateInfo di = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f, .queueCreateInfoCount = nqi,
+                             .pQueueCreateInfos = qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
+    for (int k = 0; g_vk.ffx_ok && k < 3; k++) vkGetDeviceQueue(g_vk.dev, g_vk.ffx_fam[k], ffx_idx[k], &g_vk.ffx_queue[k]);
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
                                  .vulkanApiVersion = VK_API_VERSION_1_3};
@@ -285,6 +352,37 @@ static VkPresentModeKHR present_mode(void) {
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 
+static uint64_t fg_last_count;  // (fg_throttle, below: AMD's presents after the last frame, and whether it had generation)
+static bool fg_last;
+
+// The swapchain's functions: the driver's, or AMD's replacements for its swapchain (g_vk.ffx_sc, fsr3_sc_create)
+static Fsr3SwapchainFns sc_fn = {vkGetSwapchainImagesKHR, vkAcquireNextImageKHR, vkQueuePresentKHR};
+
+// FidelityFX's swapchain in place of the driver's: false when it cannot be made (then the driver's from now on)
+static bool create_ffx_swapchain(const VkSwapchainCreateInfoKHR *ci) {
+    for (uint32_t i = 0; i < g_vk.sc_count; i++) vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
+    g_vk.sc_count = 0;
+    fsr3_sc_destroy();  // (the previous one: a surface has one swapchain at a time)
+    g_vk.swapchain = VK_NULL_HANDLE;
+    Fsr3Queues q = {{g_vk.queue, g_vk.qfam}, {g_vk.ffx_queue[2], g_vk.ffx_fam[2]}, {g_vk.ffx_queue[0], g_vk.ffx_fam[0]},
+                    {g_vk.ffx_queue[1], g_vk.ffx_fam[1]}};
+    if (fsr3_sc_create(ci, &q, &g_vk.swapchain, &sc_fn)) return g_vk.ffx_sc = true;
+    g_vk.ffx_sc = g_vk.ffx_ok = false;  // (not again)
+    sc_fn = (Fsr3SwapchainFns){vkGetSwapchainImagesKHR, vkAcquireNextImageKHR, vkQueuePresentKHR};
+    LOG("[vk] AMD's swapchain failed: the normal swapchain, no frame generation\n");
+    return false;
+}
+
+// Back to the driver's swapchain (frame generation turned off): AMD's and its real one go first
+static void drop_ffx_swapchain(void) {
+    for (uint32_t i = 0; i < g_vk.sc_count; i++) vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
+    g_vk.sc_count = 0;
+    fsr3_sc_destroy();
+    g_vk.swapchain = VK_NULL_HANDLE;
+    g_vk.ffx_sc = false;
+    sc_fn = (Fsr3SwapchainFns){vkGetSwapchainImagesKHR, vkAcquireNextImageKHR, vkQueuePresentKHR};
+}
+
 static void create_swapchain(void) {
     VkSurfaceCapabilitiesKHR caps;
     VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_vk.phys, g_vk.surface, &caps));
@@ -312,13 +410,27 @@ static void create_swapchain(void) {
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = present_mode(), .clipped = VK_TRUE,
         .oldSwapchain = old};
-    VK_CHECK(vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &g_vk.swapchain));
-    for (uint32_t i = 0; i < g_vk.sc_count; i++) vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
-    if (old) vkDestroySwapchainKHR(g_vk.dev, old, NULL);
+    fg_last = false;  // (fg_throttle: nothing of the old swapchain to wait for)
+    bool ffx = ffx_wanted();
+    if (ffx && old && !g_vk.ffx_sc) {  // (the driver's one goes first: a surface has one swapchain at a time)
+        for (uint32_t i = 0; i < g_vk.sc_count; i++) vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
+        g_vk.sc_count = 0;
+        vkDestroySwapchainKHR(g_vk.dev, old, NULL);
+        g_vk.swapchain = VK_NULL_HANDLE;
+    }
+    if (!ffx && g_vk.ffx_sc) drop_ffx_swapchain();
+    if (!ffx || !create_ffx_swapchain(&ci)) {
+        if (!g_vk.swapchain) ci.oldSwapchain = old = VK_NULL_HANDLE;  // (destroyed above, or AMD's)
+        VK_CHECK(vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &g_vk.swapchain));
+        for (uint32_t i = 0; i < g_vk.sc_count; i++) vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
+        if (old) vkDestroySwapchainKHR(g_vk.dev, old, NULL);
+    }
     g_vk.sc_format = sf.format;
     g_vk.sc_extent = ext;
-    g_vk.sc_count = 8;
-    vkGetSwapchainImagesKHR(g_vk.dev, g_vk.swapchain, &g_vk.sc_count, g_vk.sc_images);
+    // (count first: AMD's replacement leaves the count as given when it fills the array)
+    sc_fn.images(g_vk.dev, g_vk.swapchain, &g_vk.sc_count, NULL);
+    if (g_vk.sc_count > 8) g_vk.sc_count = 8;
+    sc_fn.images(g_vk.dev, g_vk.swapchain, &g_vk.sc_count, g_vk.sc_images);
     for (uint32_t i = 0; i < g_vk.sc_count; i++) {
         VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = g_vk.sc_images[i],
                                     .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = sf.format,
@@ -328,6 +440,7 @@ static void create_swapchain(void) {
 }
 
 static void recreate_swapchain(void) {
+    fsr3_sc_wait_presents();
     vkDeviceWaitIdle(g_vk.dev);
     create_swapchain();
 }
@@ -368,7 +481,9 @@ bool vk_frame_begin(const float clear[4]) {
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     if (!w || !h) return false;  // minimised
-    if (!g_vk.swapchain || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height) recreate_swapchain();
+    if (!g_vk.swapchain || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height ||
+        ffx_wanted() != g_vk.ffx_sc)  // (frame generation turned on / off: AMD's swapchain or the driver's)
+        recreate_swapchain();
     if (!g_vk.swapchain) return false;
     static int trace = -1;
     if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
@@ -376,10 +491,10 @@ bool vk_frame_begin(const float clear[4]) {
     slot = (slot + 1) % FRAMES;
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
     vk_wait_seq(slot_seq[slot]);
-    VkResult r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
+    VkResult r = sc_fn.acquire(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         recreate_swapchain();
-        r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
+        r = sc_fn.acquire(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image);
     }
     static unsigned acquire_fails;  // (a window the driver keeps reporting out of date: logged once per 600, not every frame)
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
@@ -387,6 +502,7 @@ bool vk_frame_begin(const float clear[4]) {
         return false;
     }
     acquire_fails = 0;
+    if (trace) LOG("[vk] acquired image %u\n", cur_frame.image);
     cur_frame.acquired = acquire_sem[slot];
     slot_seq[slot] = vk_pending_seq();
     VkCommandBuffer cb = vk_cmd();
@@ -439,9 +555,31 @@ static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
+// Frame generation: AMD's presenter thread (FidelityFX SDK 1.1.4, FrameInterpolationSwapchainVK.cpp) shows only the
+// latest frame handed to it, and while it waits to space its presents (by the average of the last frame times) newer
+// ones replace older ones. With two dropped in a row, the generation - on the game queue, into one of two outputs -
+// waits for a composition that never comes: the GPU and then this thread stall for good (in the scripted turbo runs
+// after a slow frame, 1 in 3). So after a frame with generation, the next present waits until the presenter has made
+// a present since then (it has taken that frame or the one before: never two dropped). At a steady frame rate it has,
+// long before; at most 100 ms (a present it could not make: no image).
+static void fg_throttle(void) {
+    if (!fg_last) return;
+    uint64_t t0 = SDL_GetTicksNS();
+    while (fsr3_sc_present_count() <= fg_last_count) {
+        if (SDL_GetTicksNS() - t0 > 100000000) {
+            static int n;
+            if (n++ < 10) LOG("[vk] frame generation: the presenter made no present in 100 ms\n");
+            break;
+        }
+        SDL_DelayPrecise(250000);
+    }
+}
+
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
 void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
+    extern bool vk_fg_present(void);
+    bool fg = vk_fg_present();  // (frame generation for this present, or none: exec.c)
     VkCommandBuffer cb = vk_cmd();
     vkCmdEndRendering(cb);
     VkSpan shot = {0};
@@ -453,7 +591,13 @@ void vk_frame_end(const char *shot_path) {
     vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE);
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
-    VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
+    static int trace = -1;
+    if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
+    if (trace) LOG("[vk] present image %u\n", img);
+    fg_throttle();
+    VkResult r = sc_fn.present(g_vk.queue, &pi);
+    fg_last_count = fsr3_sc_present_count(), fg_last = fg;
+    if (trace) LOG("[vk] presented: %d\n", r);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
     cur_frame.ok = false;
     if (shot_path) {
@@ -655,6 +799,27 @@ void backend_present(NvnTexture *t) {
             if (exit_at && (long)total_frames >= exit_at) { LOG("[vk] exit at present %llu\n", (unsigned long long)total_frames); fflush(csv); fflush(stderr); _exit(0); }
         }
     }
+    {   // LARECOMP_FG_TOGGLE_AT=<frame>,...: frame generation on / off at those presents, as the F12 menu does (tests of
+        // the switch between AMD's swapchain and the driver's)
+        const char *e = getenv("LARECOMP_FG_TOGGLE_AT");
+        for (const char *p = e; p && *p;) {
+            long at = strtol(p, (char **)&p, 10);
+            if (at == (long)total_frames) {
+                g_settings.frame_gen = g_settings.frame_gen ? 0 : 2;
+                LOG("[vk] frame generation %s (LARECOMP_FG_TOGGLE_AT)\n", g_settings.frame_gen ? "on" : "off");
+            }
+            if (*p == ',') p++; else break;
+        }
+    }
+    {   // LARECOMP_FPS_AT=<present>:<fps>,...: the frame rate limit changed at those presents, as the F12 menu does
+        const char *e = getenv("LARECOMP_FPS_AT");
+        for (const char *p = e; p && *p;) {
+            long at = strtol(p, (char **)&p, 10);
+            int fps = *p == ':' ? (int)strtol(p + 1, (char **)&p, 10) : 30;
+            if (at == (long)total_frames) { g_settings.fps = fps; LOG("[vk] frame rate limit %d (LARECOMP_FPS_AT)\n", fps); }
+            if (*p == ',') p++; else break;
+        }
+    }
     {   // LARECOMP_RENDERDOC_AT=<frame>: under RenderDoc (renderdoccmd capture), capture the frame after that one
         extern void renderdoc_frame(uint64_t frame);
         renderdoc_frame(total_frames);
@@ -739,6 +904,11 @@ void backend_present(NvnTexture *t) {
     if (prev_present > 0 && now - prev_present > max_gap) max_gap = now - prev_present;
     prev_present = now;
     if (now - last_fps_time >= fps_iv) {
+        static uint64_t sc_prev;  // (AMD's swapchain: what reached the window, generated frames included)
+        uint64_t sc_now = fsr3_sc_present_count();
+        if (last_fps_time > 0 && g_vk.ffx_sc)
+            LOG("[vk] t=%.1f window %.1f fps (AMD swapchain)\n", now, (double)(sc_now - sc_prev) / (now - last_fps_time));
+        sc_prev = sc_now;
         if (last_fps_time > 0)
             LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms (%s)\n", now, (unsigned long long)total_frames,
                 frames / (now - last_fps_time), max_gap * 1000.0, renderer_stats());
@@ -759,6 +929,7 @@ static void quick_exit_handler(void) {
     if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
     if (trace) LOG("[vk] exit: waiting for the GPU\n");
     if (g_vk.dev) {
+        fsr3_sc_wait_presents();
         vkDeviceWaitIdle(g_vk.dev);
         if (trace) LOG("[vk] exit: saving the pipeline cache\n");
         vk_pipeline_cache_save();

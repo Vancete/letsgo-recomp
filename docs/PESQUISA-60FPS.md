@@ -224,3 +224,39 @@ Testada em jogo depois das correções acima, a interpolação nas batalhas e ca
 para o jogador. Ela foi tirada do modo 60: `LARECOMP_FPS60=1` deixa mundo, menus e Pokédex a 60 nativos (passo 1 do
 accessor) e batalhas e capturas a 30, como o jogo original, sem quadro intermediário. O código da interpolação fica
 só para pesquisa (`LARECOMP_INTERP=1`); a escolha de 60 fps no launcher não a liga mais.
+
+## A velocidade de andar a 60 e 120 fps (19/10/2026, Pikachu 1.0.0)
+
+O mundo a 60 / 120 não andava na velocidade certa: o jogador ia a ~85 % / ~53 % da velocidade de 30 fps.
+
+**Medida** (`tools/walk_speed.sh <nome> <fps>`): corrida seca, andando para baixo em Viridian 5 s de jogo depois de o
+mundo começar (presente 1350 + 5·fps: com o nome da área na tela o direcional é ignorado) e a posição da câmera, que
+segue o jogador, a cada quadro (`LARECOMP_CAM_LOG=1`, `exec.c`: −Rᵀt da matriz de vista do bloco da cena). Velocidade
+estável: **391 cm/s a 30, 331 a 60, 211 a 120**, ou por atualização 13,04 / 5,52 / 1,76 cm. Isso é exatamente
+`450,8 cm/s × passo − 2,0 cm`: uma parte proporcional ao tempo e uma parte **fixa por atualização**.
+
+**Onde** (`LARECOMP_WATCH_LIKE=<presente>:<endereço>` em `memwatch.c`: no presente indicado, todas as palavras dos
+heaps com o mesmo valor da posição do jogador; as escritas em cada uma, com a pilha, em ordem). Por atualização, na
+posição do jogador (objeto de `f_70005ed120`, +0xb0 x/y/z):
+1. `f_700021b6f0` soma `girar(orientação +0xa0, vetor global × s16)`: **−2 cm** correndo para frente. `s16` é um dos
+   parâmetros +0x70 / +0x74 / +0x78 do componente de movimento (o x0 dela, um só por quadro: o do jogador), escolhido
+   pelo estado do direcional (3 estados por limiares; 0 no estado 1). Ajustado para uma atualização de 33,3 ms.
+2. `f_70005ed550` (do `f_70005ed120`, a animação) soma o deslocamento da raiz da animação: proporcional ao tempo.
+3. `f_7000213c50` reescreve o mesmo valor.
+
+A mesma `f_700021b6f0` gira o jogador para o direcional com `f_700020b7e0` (slerp de quatérnios) e **t = 0,5 por
+atualização**: a 60 / 120 fps, o giro ficava 2× / 4× mais rápido.
+
+**Correção** (`runtime/hle/fps60.c`, "the player's walking"): enquanto `f_700021b6f0` roda no mundo a 60 / 120 fps,
+os três parâmetros vão multiplicados por passo / 33,3 ms e o t do slerp chamado dentro dela vira 1 − (1 − t)^(passo /
+33,3 ms). Funções achadas pelo código (assinatura perto do endereço do Pikachu 1.0.0; a do Eevee fica a poucas
+instruções). Resultado: **391 cm/s a 30, 60 e 120 fps**; 2 s de corrida: 754 / 736 / 742 cm. Num giro de 90° sobra
+uma diferença de ~0,05 s no começo (a 30 fps cada atualização gira 45° de uma vez e já anda 13 cm na direção nova).
+`LARECOMP_FPS60_NOWALKFIX=1` desliga a correção, para comparar.
+
+**Caminho até ela** (para a próxima velocidade errada): `LARECOMP_STEP_SCALE=<fn>:<fator>` (o passo 1 multiplicado
+durante uma função: só `f_70005ed120` mudava a velocidade), `LARECOMP_FARG_SCALE=<fn>:<fator>` (o primeiro argumento
+float: `f_70005febd0`, o avanço do tempo da animação, é a alavanca, e a velocidade em função dele deu a reta acima),
+`LARECOMP_FIND_MOVER=<presente>` (dentro dos objetos de `f_70005ed120`, os trios de floats que andam 1–20 cm por
+atualização: a posição do jogador) e o `LARECOMP_WATCH_LIKE` acima. Desmontagem: `tools/disasm.py` (com o `main` do
+jogo em `extracted/exefs`).

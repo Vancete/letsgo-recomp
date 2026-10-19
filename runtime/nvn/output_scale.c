@@ -89,8 +89,9 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
         h = reshape ? dh / 1080.0 : fit;  // Match display
         if (mode == RES_DYNAMIC) {
             extern bool fps60_enabled(void), fps60_world(void), fps60_menu(void);
-            bool at_60 = fps60_enabled() && (fps60_world() || fps60_menu());
-            dyn_update(now, gpu_ms, at_60 ? 16.666667 : 33.333333);
+            extern int fps60_rate(void);
+            double budget = !fps60_enabled() ? 33.333333 : fps60_world() ? 1000.0 / fps60_rate() : fps60_menu() ? 16.666667 : 33.333333;
+            dyn_update(now, gpu_ms, budget);
             h *= g_dyn;
         }
         else if (mode == RES_Q75) h *= 0.75;

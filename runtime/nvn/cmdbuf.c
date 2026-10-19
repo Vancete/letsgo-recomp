@@ -108,12 +108,11 @@ static int g_ntrace_cb, g_ntrace_list;
 NVN(nvnCommandBufferBeginRecording) {
     draw_chain(c, "begin", 0);
     static bool hooked;  // (hooks cost every game function a lookup: only with interpolation on)
-    if (!hooked) {
+    extern bool vk_interp_enabled(void), fps60_enabled(void);
+    // (the 60 fps mode turns interpolation on only in menus: hooked from when it is on - the start, or the F12 menu later)
+    if (!hooked && (vk_interp_enabled() || fps60_enabled()) && !getenv("LARECOMP_INTERP_NOOBJ")) {  // (NOOBJ: pair by order, the old prototype)
         hooked = true;
-        extern bool vk_interp_enabled(void), fps60_enabled(void);
-        // (the 60 fps mode turns interpolation on only inside battles and captures: hooked from the start all the same)
-        if ((vk_interp_enabled() || fps60_enabled()) && !getenv("LARECOMP_INTERP_NOOBJ"))  // (NOOBJ: pair by order, the old prototype)
-            for (size_t i = 0; i < sizeof k_obj_fns / sizeof k_obj_fns[0]; i++) rt_register_fnhook(k_obj_fns[i], obj_hook);
+        for (size_t i = 0; i < sizeof k_obj_fns / sizeof k_obj_fns[0]; i++) rt_register_fnhook(k_obj_fns[i], obj_hook);
     }
     NvnCmdBuf *cb = cb_of(A(0));
     cb->obj_tag = 0;

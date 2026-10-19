@@ -260,7 +260,7 @@ extern "C" void launcher_lg_run(const char *root) {
     int res = 0;
     for (int i = 0; i < 5; i++) if (res_lines[i] == g_settings.res_height) res = i;
     bool ui2x_on = g_settings.ui2x;  // (the interface at 2x: runtime/ui2x.c)
-    bool full = g_settings.fullscreen, smaa = g_settings.antialias != AA_OFF, fps60 = g_settings.fps == 60,
+    bool full = g_settings.fullscreen, smaa = g_settings.antialias != AA_OFF, fps60 = g_settings.fps >= 60,
          wildb = g_settings.wild_battle;
     // Translation: the folders under mods/ (runtime/mods.h); 0 = none (the game's own English)
     static char mods[MODS_MAX][128];
@@ -373,9 +373,10 @@ extern "C" void launcher_lg_run(const char *root) {
     }
     g_settings.res_height = res_lines[res];
     g_settings.fullscreen = full;
-    // (the box is anti-aliasing on / off: TAA, chosen in the F12 menu, stays TAA)
-    g_settings.antialias = !smaa ? AA_OFF : g_settings.antialias == AA_TAA ? AA_TAA : AA_SMAA;
-    g_settings.fps = fps60 ? 60 : 30;
+    // (the box is anti-aliasing on / off: TAA or FSR 3.1, chosen in the F12 menu, stay)
+    g_settings.antialias = !smaa ? AA_OFF : g_settings.antialias == AA_TAA || g_settings.antialias == AA_FSR3 ? g_settings.antialias : AA_SMAA;
+    settings_apply_levels();  // (the upscaler follows)
+    g_settings.fps = !fps60 ? 30 : g_settings.fps == 120 ? 120 : 60;  // (120: the F12 menu's, kept)
     g_settings.wild_battle = wildb;
     g_settings.ui2x = ui2x_on;
     snprintf(g_settings.mod, sizeof g_settings.mod, "%s", mod ? mods[mod - 1] : "");

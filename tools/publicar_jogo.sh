@@ -14,5 +14,4 @@ cmp -s build/lasgame.dll "$dest/lasgame.dll" 2>/dev/null || cp build/lasgame.dll
 cp build/lasgame.dll.id "$dest/lasgame.dll.id"  # (the runtime refuses a game library without its matching .id)
 ldd build/lasrecomp.exe | awk '/ucrt64/ {print $3}' | sort -u | while read -r dll; do cp -u "$dll" "$dest/"; done
 cp docs/icon/icon_1024.png "$dest/icon.png"  # (window icon)
-cp -u third_party/fidelityfx/bin/amd_fidelityfx_vk.dll "$dest/"  # (FSR 3.1; without it, FSR 1)
 echo "$dest atualizado: $(date "+%d/%m %H:%M")" | tee "$dest/versao.txt"

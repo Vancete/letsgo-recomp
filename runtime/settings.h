@@ -11,23 +11,29 @@ enum { FSR3_NATIVE_AA = 0, FSR3_QUALITY = 1, FSR3_BALANCED = 2, FSR3_PERFORMANCE
 float settings_fsr3_ratio(void);  // 1.0, 1.5, 1.7, 2.0, 3.0
 #define UPSCALE_SHARP UPSCALE_FSR1  // the non-bilinear upscaler (the default)
 // TAA: temporal, on the game's HDR scene before its bloom (runtime/nvn/vulkan/exec.c taa_run), jittered draws
-enum { AA_OFF = 0, AA_SMAA = 1, AA_TAA = 2 };
+// FSR 3.1 is the fourth choice: it anti-aliases and upscales (the upscaler follows: settings_apply_levels)
+enum { AA_OFF = 0, AA_SMAA = 1, AA_TAA = 2, AA_FSR3 = 3 };
+// SSAO and GI quality (F12 menu): their parameters follow (settings_apply_levels); HIGH = the former defaults
+enum { FX_OFF = 0, FX_LOW = 1, FX_MEDIUM = 2, FX_HIGH = 3 };
 enum { VREAD_AUTO = 0, VREAD_COPY = 1, VREAD_DIRECT = 2 };
 // the game's (each of its taps a hard in / out), each tap bilinear (2x2 PCF), each tap a 3x3 tent (4 bilinear lookups)
 enum { SHADOW_GAME = 0, SHADOW_BILINEAR = 1, SHADOW_SMOOTH = 2 };
 
 typedef struct {
     bool fullscreen;
-    int fps;  // 30 (the game's own) or 60 (interpolated: runtime/nvn/vulkan/exec.c)
+    int fps;  // 30 (the game's own), 60 or 120 (experimental): the world's rate (runtime/hle/fps60.c; F12 menu, live)
     int res_mode;        // RES_MATCH, 1..4 (N x the Switch's 1080p), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
     int res_height;      // the launcher's render height in lines (720 / 1080 / 1440 / 2160); 0: res_mode decides
-    int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window
+    int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (from antialias: FSR 3.1 or bilinear)
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     float volume;        // master volume, 1 = 100%
     float brightness;    // colour of the game image (F12 menu, runtime/ui/menu.mm; post pass in runtime/nvn/vulkan/exec.c):
     float contrast;      // 1 = unchanged for all three; brightness / contrast 0.5..1.5, saturation 0..2
     float saturation;
+    int ssao_level;       // FX_*: SSAO quality (default off); ssao and its parameters follow it
+    int gi_level;         // FX_*: GI quality (default off); gi and its parameters follow it
     bool ssao;            // screen-space ambient occlusion on the game's HDR scene (F12 menu; runtime/nvn/vulkan/exec.c)
+    int ssao_samples;     // per pixel: 8 / 12 / 16
     float ssao_intensity; // 0..3 (default 2)
     float ssao_radius;    // in the game's world units (~cm): 10..400 (default 100)
     bool ssao_temporal;   // accumulated over frames along the camera motion vectors (exec.c ssao_run)
@@ -36,6 +42,8 @@ typedef struct {
     bool mv_objects;      // per-object motion vectors (characters' own motion) when motion vectors are in use (default on)
     float taa_sharpness;  // TAA: RCAS sharpening at the present, 0..1 (default 0.5)
     int fsr3_preset;      // FSR3_*: with the FSR 3.1 upscaler, the render resolution (default FSR3_QUALITY)
+    bool ffx_swapchain;   // the window's swapchain is AMD FidelityFX's (frame generation's; from the next start; default off)
+    int frame_gen;        // FSR 3.1 frame generation with FSR 3.1 anti-aliasing: 0 off, 2 (x2: the only one FSR 3.1 has)
     bool blur_quality;    // the game's downsample / blur / depth-of-field composite read better (runtime/nvn/vulkan/exec.c fx_patch_fs)
     bool ui2x;            // the interface textures at 2x when cache/ui2x.pak was made (start screen; runtime/ui2x.c)
     int shadow_filter;    // SHADOW_*: how the shadow map is filtered (F12 menu; textures.c vk_sampler, translate.c shpcf)
@@ -67,3 +75,4 @@ extern Settings g_settings;
 void settings_load(void);
 void settings_save(void);
 void settings_clamp_color(void);  // brightness / contrast / saturation / SSAO into their ranges
+void settings_apply_levels(void);  // the SSAO / GI parameters from their levels, the upscaler from the anti-aliasing

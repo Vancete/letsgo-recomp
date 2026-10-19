@@ -1,4 +1,6 @@
-// 60 fps (experimental): the world and the menus at 60, battles and captures as the game made them (30).
+// 60 fps (experimental): the world and the menus at 60, battles and captures as the game made them (30). 120 (more
+// experimental): the world at 120 the same way (G[1] = 8.33 ms), menus still 30 with the in-between image (60).
+// The F12 menu switches the rate while the game runs (fps60_present, on the game thread: hooks added then).
 //
 // The game keeps a table of frame durations G (main+0xf7eeb8: 16.67 ms, 33.33 ms, 50 ms, ...; read through the pointer
 // at main+0x15fb438). The world's update step comes from G[1] through the accessor f_7000039600; menus, battles and
@@ -15,6 +17,9 @@
 // 16.67 ms only while those functions run, to find which readers a speed comes from.
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <math.h>
+#include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,6 +33,8 @@ uint64_t renderer_game_frame(void);
 #define G1_ADDR 0x7000f7eec0ull  // G[1]: 33333334 ns
 #define G1_ORIGINAL 33333334u
 #define G1_60HZ 16666667u
+static uint32_t g_g1 = G1_60HZ;  // the world's step: 16.67 ms (60 fps) or 8.33 ms (120)
+static int g_rate = 60;
 #define FIELD_UPDATE 0x70002f8bb0ull  // the world's update, every frame while it runs
 #define G_ACCESSOR 0x7000039600ull    // G[index]: the world's step comes through here
 
@@ -97,12 +104,16 @@ static int field_hook(Cpu *c, uint64_t addr) {
     return 0;  // (the game's function runs as usual)
 }
 
+// The frame-step timers (the accessor's x0): entries of 16 bytes, step i at +0x10 + 16 i (setter f_7000039620)
+static uint64_t g_timers;
+
 // G[1] at 60 Hz for the duration of f: the world's step; any other scene keeps the game's value.
 static int accessor_hook(Cpu *c, uint64_t addr) {
     volatile uint32_t *g1 = (volatile uint32_t *)(uintptr_t)G1_ADDR;
     g_n_acc++;
+    g_timers = c->x[0];
     if (!g_on || !g_world) return 0;
-    *g1 = G1_60HZ;
+    *g1 = g_g1;
     rt_call_original(c, addr);
     *g1 = G1_ORIGINAL;
     return 1;
@@ -167,6 +178,10 @@ static int elapsed_hook(Cpu *c, uint64_t addr) {
 }
 
 bool fps60_enabled(void) { return g_on; }
+int fps60_rate(void) { return g_rate; }  // the world's frame rate while on: 60 or 120
+// The duration of a frame now (runtime/nvn/objects.c pacing, output_scale.c dynamic resolution): the world's at its
+// rate, the rest at the game's 30
+uint64_t fps60_period_ns(void) { return g_on && g_world ? 1000000000ull / (uint64_t)g_rate : 33333333ull; }
 bool fps60_world(void) { return g_world; }
 // A menu (the Pokédex, the bag...): the world stopped and no battle or capture runs. Logic at 30, shown at 60 with the
 // in-between image (runtime/nvn/vulkan/exec.c); battles and captures get none (tried, left out: docs/HISTORICO.md 46).
@@ -175,7 +190,98 @@ bool fps60_menu(void) { return g_on && g_played && !g_world && !g_special; }
 // At each present (before its pacing): was this a world frame?
 void fps60_probe_present(void);
 int rt_present_interval(void);
+// ---- the player's walking at 60 / 120 fps
+// The player moves by the walking animation's root motion (time-based: right at any rate) plus, once per world update,
+// an offset of its own (f_700021b6f0 of Pikachu 1.0.0: position += facing x a vector x one of the movement component's
+// parameters +0x70 / +0x74 / +0x78, by the stick's state - -2 cm at a run, sized for a 33.3 ms update). Per update, not
+// per second: at 30 fps it takes 60 cm/s off the animation's 450.8 (391 cm/s), at 60 fps 120 (331), at 120 fps 240
+// (211) - the player walked at 85 % and 53 % of the speed (measured with tools/walk_speed.sh; found with
+// LARECOMP_WATCH_LIKE / memwatch.c: the writes to the player's position, in order). The same function turns the
+// player toward the stick with a slerp of t = 0.5 per update: twice / four times as fast at 60 / 120. While it runs in
+// the world at 60 / 120 fps, the parameters are scaled by the step's share of 33.3 ms and the slerp's t becomes
+// 1 - (1 - t)^share: per second, what the game does at 30. Found by their code (a signature near Pikachu 1.0.0's
+// address: Eevee's sits a few instructions away); not found, nothing changes.
+#define MOVE_FN_NEAR 0x700021b6f0ull
+#define SLERP_FN_NEAR 0x700020b7e0ull
+static const uint32_t k_move_sig[] = {0xd10483ff, 0xa90c6ffc, 0xa90d67fa, 0xa90e5ff8, 0xa90f57f6, 0xa9104ff4,
+                                      0xa9117bfd, 0x910443fd, 0xaa0103f3, 0xf9400275, 0xaa0003f4, 0xb40001d5};
+static const uint32_t k_slerp_sig[] = {0x6dbe2beb, 0x6d0123e9, 0x3dc00001, 0x3dc00022, 0 /* adrp */, 0x6e22dc23, 0x6e034064, 0x0e23d483};
+static uint64_t find_near(uint64_t near, const uint32_t *sig, int n) {
+    for (int64_t d = 0; d <= 0x4000; d += 4)
+        for (int s = -1; s <= 1; s += 2) {
+            const uint32_t *w = (const uint32_t *)(uintptr_t)(near + (uint64_t)(d * s));
+            int i = 0;
+            while (i < n && (!sig[i] || w[i] == sig[i])) i++;
+            if (i == n) return near + (uint64_t)(d * s);
+        }
+    return 0;
+}
+static __thread bool t_in_move;
+static __thread float t_move_k;
+static int move_hook(Cpu *c, uint64_t addr) {
+    float k = g_on && g_world ? (float)g_g1 / (float)G1_ORIGINAL : 1.0f;
+    if (k >= 0.999f || c->x[0] < 0x7000000000ull) return 0;  // (the game's own step: as it is)
+    float *p = (float *)(uintptr_t)(c->x[0] + 0x70), was[3] = {p[0], p[1], p[2]};
+    for (int i = 0; i < 3; i++) p[i] = was[i] * k;
+    t_in_move = true, t_move_k = k;
+    rt_call_original(c, addr);
+    t_in_move = false;
+    for (int i = 0; i < 3; i++) p[i] = was[i];
+    return 1;
+}
+static int slerp_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    if (!t_in_move) return 0;
+    float t;
+    memcpy(&t, &c->v[0], 4);
+    if (t > 0 && t < 1) {
+        t = 1.0f - powf(1.0f - t, t_move_k);
+        memcpy(&c->v[0], &t, 4);
+    }
+    return 0;  // (the slerp runs with that t)
+}
+static void hook_walk(void) {  // (the game's code loaded: at a present)
+    static bool done;
+    if (done || getenv("LARECOMP_FPS60_NOWALKFIX")) return;
+    done = true;
+    extern void rt_register_fnhook_raw(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
+    uint64_t m = find_near(MOVE_FN_NEAR, k_move_sig, 12), s = find_near(SLERP_FN_NEAR, k_slerp_sig, 8);
+    if (m) rt_register_fnhook_raw(m, move_hook);
+    if (m && s) rt_register_fnhook_raw(s, slerp_hook);
+    LOG("[fps60] walking fix: movement f_%llx, turning f_%llx%s\n", (unsigned long long)m, (unsigned long long)s,
+        m ? "" : " (not found: walking slower at 60 / 120)");
+}
+
+static bool hooked;
+static void hook_all(void) {
+    if (hooked) return;
+    hooked = true;
+    rt_register_fnhook(FIELD_UPDATE, field_hook);
+    rt_register_fnhook(ENCOUNTER_SCENE, scene_hook);
+    rt_register_fnhook(BATTLE_START, scene_hook);
+    rt_register_fnhook(G_ACCESSOR, accessor_hook);
+}
+
+// The F12 menu's frame rate (g_settings.fps), followed at each present (LARECOMP_FPS60 overrides it)
+static void follow_setting(void) {
+    if (getenv("LARECOMP_FPS60")) return;
+    extern uint64_t rt_addr(uint64_t eevee);
+    bool on = g_settings.fps >= 60 && rt_addr(FIELD_UPDATE);
+    int rate = g_settings.fps == 120 ? 120 : 60;
+    if (on == g_on && rate == g_rate) return;
+    if (on) hook_all();
+    if (on && !g_on) g_world = true, g_special = g_scene = false;  // (g_played: kept - the world has run already or not)
+    g_on = on, g_rate = rate, g_g1 = (uint32_t)(1000000000u / (uint32_t)rate);
+    LOG("[fps60] %s (from present %llu)\n", on ? (rate == 120 ? "120 fps" : "60 fps") : "off: 30 fps",
+        (unsigned long long)renderer_game_frame());
+}
+
 void fps60_present(void) {
+#ifdef _WIN32
+    { extern void memwatch_present(void); memwatch_present(); }  // (research: LARECOMP_WATCH_LIKE)
+#endif
+    follow_setting();
+    if (g_on) hook_walk();
     fps60_probe_present();
     if (g_stats) {
         static uint64_t t0, p0;
@@ -199,29 +305,27 @@ void fps60_present(void) {
     g_world = w;
     static int last = -1;  // 0 world, 1 menu (in-between images), 2 battle / capture
     int state = w ? 0 : fps60_menu() ? 1 : 2;
-    static const char *const name[] = {"world: 60 fps", "menu: 30 fps with in-between images", "battle / capture: 30 fps"};
-    if (state != last) LOG("[fps60] %s from present %llu\n", name[state], (unsigned long long)renderer_game_frame());
+    static const char *const name[] = {"world: %d fps", "menu: 30 fps with in-between images", "battle / capture: 30 fps"};
+    if (state != last) {
+        char what[64];
+        snprintf(what, sizeof what, name[state], g_rate);
+        LOG("[fps60] %s from present %llu\n", what, (unsigned long long)renderer_game_frame());
+    }
     last = state;
 }
 
 // Before each boot (runtime/main.c): the launcher's "60 fps (experimental)" (larecomp.ini fps = 60) turns the mode on
 // when LARECOMP_FPS60 doesn't say otherwise.
 void fps60_configure(void) {
-    static bool hooked;
     extern void settings_load(void);
     settings_load();  // (read once; without the launcher it would come later, in boot)
-    if (!getenv("LARECOMP_FPS60")) g_on = g_settings.fps == 60, g_all60 = false;
+    if (!getenv("LARECOMP_FPS60")) g_on = g_settings.fps >= 60, g_all60 = false;
+    g_rate = g_settings.fps == 120 ? 120 : 60, g_g1 = (uint32_t)(1000000000u / (uint32_t)g_rate);
     extern uint64_t rt_addr(uint64_t eevee);  // (runtime/fnhook.c: 0 in a build it doesn't know)
     if (!rt_addr(FIELD_UPDATE)) g_on = g_all60 = false;
-    if ((g_on || g_stats || getenv("LARECOMP_INPUT_LOOP")) && !hooked) {
-        hooked = true;
-        rt_register_fnhook(FIELD_UPDATE, field_hook);
-        rt_register_fnhook(ENCOUNTER_SCENE, scene_hook);
-        rt_register_fnhook(BATTLE_START, scene_hook);
-        rt_register_fnhook(G_ACCESSOR, accessor_hook);
-    }
+    if (g_on || g_stats || getenv("LARECOMP_INPUT_LOOP")) hook_all();
     g_world = true, g_special = g_scene = g_played = false;
-    if (g_on) LOG("[fps60] on: the world at 60, menus at 30 with in-between images, battles and captures at 30\n");
+    if (g_on) LOG("[fps60] on: the world at %d, menus at 30 with in-between images, battles and captures at 30\n", g_rate);
 }
 
 __attribute__((constructor)) static void fps60_init(void) {
@@ -251,6 +355,158 @@ __attribute__((constructor)) static void fps60_init(void) {
     if (!e) return;
     snprintf(buf, sizeof buf, "%s", e);
     for (char *t = strtok(buf, ","); t; t = strtok(NULL, ",")) rt_register_fnhook(strtoull(t, NULL, 16), g1_reader_hook);
+}
+
+// ---- research: LARECOMP_STEP_SCALE="<fn addr of the running build>:<factor>[,...]": timer 1's step times that factor
+// while the function runs (which reader of the step a speed comes from: the world's walking at 60 / 120 fps)
+#define SS_MAX 8
+static uint64_t g_ss_fn[SS_MAX];
+static double g_ss_k[SS_MAX];
+static int g_nss;
+static int step_scale_hook(Cpu *c, uint64_t addr) {
+    double k = 1;
+    for (int i = 0; i < g_nss; i++) if (g_ss_fn[i] == addr) k = g_ss_k[i];
+    volatile int64_t *step = g_timers ? (volatile int64_t *)(uintptr_t)(g_timers + 0x20) : NULL;
+    int64_t was = step ? *step : 0;
+    static int log = -1, n;  // LARECOMP_STEP_SCALE_LOG=<first present>: the object's +0x494..+0x49c, 40 calls from then
+    if (log == -1) log = getenv("LARECOMP_STEP_SCALE_LOG") ? atoi(getenv("LARECOMP_STEP_SCALE_LOG")) : -2;
+    if (log >= 0 && (long)renderer_game_frame() >= log && n < 40 && c->x[0] >= 0x7000000000ull) {
+        const uint8_t *o = (const uint8_t *)(uintptr_t)c->x[0];
+        n++;
+        LOG("[stepscale] present %llu f_%llx obj %llx: +494 %u +498 %u +49c %g +493 %u step %lld\n",
+            (unsigned long long)renderer_game_frame(), (unsigned long long)addr, (unsigned long long)c->x[0],
+            *(const uint32_t *)(o + 0x494), *(const uint32_t *)(o + 0x498), *(const float *)(o + 0x49c), o[0x493], (long long)was);
+    }
+    if (step) *step = (int64_t)((double)was * k);
+    rt_call_original(c, addr);
+    if (step) *step = was;
+    {   // LARECOMP_FIND_MOVER=<first present>: in each object (its first 0x1000 bytes) handed to the function, the float
+        // triples whose ground-plane step (x, z) between two of its updates is 1-20 cm - a walking character's position -
+        // for 6 updates; logged with their offsets
+        static long from = -2;
+        if (from == -2) from = getenv("LARECOMP_FIND_MOVER") ? atol(getenv("LARECOMP_FIND_MOVER")) : -1;
+        static struct { uint64_t obj; float prev[0x400]; int hits[0x400]; int n; } fm[32];
+        long f = (long)renderer_game_frame();
+        uint64_t o = c->x[0];
+        if (from >= 0 && f >= from && f < from + 6 && o >= 0x7000000000ull) {
+            int i = 0;
+            while (i < 32 && fm[i].obj && fm[i].obj != o) i++;
+            if (i < 32) {
+                const float *now = (const float *)(uintptr_t)o;
+                if (fm[i].obj == o && fm[i].n)
+                    for (int w = 0; w + 2 < 0x400; w++) {
+                        float dx = now[w] - fm[i].prev[w], dz = now[w + 2] - fm[i].prev[w + 2];
+                        float d = sqrtf(dx * dx + dz * dz);
+                        if (d > 1 && d < 20 && isfinite(d) && fabsf(now[w]) < 1e6f) fm[i].hits[w]++;
+                    }
+                fm[i].obj = o;
+                memcpy(fm[i].prev, now, sizeof fm[i].prev);
+                fm[i].n++;
+                static FILE *dump;  // LARECOMP_FIND_MOVER_DUMP=<file>: every object's 0x1000 bytes at each of those updates
+                static int dump_init;
+                if (!dump_init) { dump_init = 1; const char *p = getenv("LARECOMP_FIND_MOVER_DUMP"); if (p) dump = fopen(p, "w"); }
+                if (dump) {  // (one write per line, under a lock: several game threads update characters)
+                    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+                    static char line[0x400 * 9 + 64];
+                    pthread_mutex_lock(&lock);
+                    int len = snprintf(line, sizeof line, "%ld %llx", f, (unsigned long long)o);
+                    for (int w = 0; w < 0x400; w++) len += snprintf(line + len, sizeof line - len, " %08x", ((const uint32_t *)now)[w]);
+                    line[len++] = '\n';
+                    fwrite(line, 1, (size_t)len, dump);
+                    fflush(dump);
+                    pthread_mutex_unlock(&lock);
+                }
+            }
+        }
+        if (from >= 0 && f == from + 6) {
+            for (int i = 0; i < 32 && fm[i].obj; i++)
+                for (int w = 0; w + 2 < 0x400; w++)
+                    if (fm[i].hits[w] >= 4) {
+                        const float *now = (const float *)(uintptr_t)fm[i].obj;
+                        LOG("[mover] obj %llx +0x%x: (%g, %g, %g) moved in %d updates\n", (unsigned long long)fm[i].obj, w * 4,
+                            now[w], now[w + 1], now[w + 2], fm[i].hits[w]);
+                    }
+            from = -1;
+        }
+    }
+    return 1;
+}
+__attribute__((constructor)) static void step_scale_init(void) {
+    const char *e = getenv("LARECOMP_STEP_SCALE");
+    if (!e) return;
+    extern void rt_register_fnhook_raw(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
+    char buf[512];
+    snprintf(buf, sizeof buf, "%s", e);
+    for (char *t = strtok(buf, ","); t && g_nss < SS_MAX; t = strtok(NULL, ",")) {
+        g_ss_fn[g_nss] = strtoull(t, NULL, 16);
+        g_ss_k[g_nss] = strchr(t, ':') ? atof(strchr(t, ':') + 1) : 1;
+        rt_register_fnhook_raw(g_ss_fn[g_nss++], step_scale_hook);
+    }
+}
+
+// ---- research: LARECOMP_FARG_SCALE="<fn addr of the running build>:<factor>[,...]": the function's first float argument
+// (s0: a time step handed down) times that factor (which part of an update a speed comes from)
+static uint64_t g_fa_fn[SS_MAX];
+static float g_fa_k[SS_MAX];
+static int g_nfa;
+static int farg_scale_hook(Cpu *c, uint64_t addr) {
+    float s0;
+    memcpy(&s0, &c->v[0], 4);
+    static int log = -1, n;  // LARECOMP_FARG_LOG=<first present>: x0's floats +0x120..+0x138 (an animation player's), 300 calls
+    if (log == -1) log = getenv("LARECOMP_FARG_LOG") ? atoi(getenv("LARECOMP_FARG_LOG")) : -2;
+    if (log >= 0 && (long)renderer_game_frame() >= log && n < 300 && c->x[0] >= 0x7000000000ull) {
+        const uint8_t *o = (const uint8_t *)(uintptr_t)c->x[0];
+        n++;
+        LOG("[farg] present %llu obj %llx dt %g: mode %u fps %u speed %g time %g start %g end %g\n", (unsigned long long)renderer_game_frame(),
+            (unsigned long long)c->x[0], s0, *(const uint32_t *)(o + 0x120), *(const uint32_t *)(o + 0x124), *(const float *)(o + 0x128),
+            *(const float *)(o + 0x12c), *(const float *)(o + 0x130), *(const float *)(o + 0x134));
+    }
+    for (int i = 0; i < g_nfa; i++) if (g_fa_fn[i] == addr) s0 *= g_fa_k[i];
+    memcpy(&c->v[0], &s0, 4);
+    rt_call_original(c, addr);
+    return 1;
+}
+__attribute__((constructor)) static void farg_scale_init(void) {
+    const char *e = getenv("LARECOMP_FARG_SCALE");
+    if (!e) return;
+    extern void rt_register_fnhook_raw(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
+    char buf[512];
+    snprintf(buf, sizeof buf, "%s", e);
+    for (char *t = strtok(buf, ","); t && g_nfa < SS_MAX; t = strtok(NULL, ",")) {
+        g_fa_fn[g_nfa] = strtoull(t, NULL, 16);
+        g_fa_k[g_nfa] = strchr(t, ':') ? (float)atof(strchr(t, ':') + 1) : 1;
+        rt_register_fnhook_raw(g_fa_fn[g_nfa++], farg_scale_hook);
+    }
+}
+
+// ---- research: LARECOMP_FNWATCH=<guest addr of a float> + LARECOMP_FNWATCH_FNS="<fn addr of the running build>[,...]": logs
+// (the first 200 times) when the float changes during one of those functions - which one writes it, and by how much
+static uint64_t g_watch;
+static int watch_hook(Cpu *c, uint64_t addr) {
+    static int n;
+    volatile float *w = (volatile float *)(uintptr_t)g_watch;
+    float before = *w;
+    uint64_t x0 = c->x[0];
+    float s0;
+    memcpy(&s0, &c->v[0], 4);
+    rt_call_original(c, addr);
+    float after = *w;
+    if (after != before && n < 200) {
+        n++;
+        LOG("[fnwatch] present %llu f_%llx (x0 %llx s0 %g, x0 +0x78 %g): %g -> %g (d %g)\n", (unsigned long long)renderer_game_frame(),
+            (unsigned long long)addr, (unsigned long long)x0, s0, x0 >= 0x7000000000ull ? *(const float *)(uintptr_t)(x0 + 0x78) : 0.0f,
+            before, after, after - before);
+    }
+    return 1;
+}
+__attribute__((constructor)) static void watch_init(void) {
+    const char *e = getenv("LARECOMP_FNWATCH"), *fns = getenv("LARECOMP_FNWATCH_FNS");  // (LARECOMP_WATCH: memwatch.c's)
+    if (!e || !fns) return;
+    g_watch = strtoull(e, NULL, 16);
+    extern void rt_register_fnhook_raw(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));
+    char buf[1024];
+    snprintf(buf, sizeof buf, "%s", fns);
+    for (char *t = strtok(buf, ","); t; t = strtok(NULL, ",")) rt_register_fnhook_raw(strtoull(t, NULL, 16), watch_hook);
 }
 
 // ---- research: LARECOMP_TIME_PROBE="<fn addr>[,...]" (+ LARECOMP_TIME_PROBE_FRAMES=<first>-<last>) ------------------

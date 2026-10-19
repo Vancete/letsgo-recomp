@@ -431,7 +431,7 @@ static const char *builtin_src(const char *name, int *stage) {
             "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; } pc;\n"
             "layout(location = 0) out vec4 o;\n"
             "float lin(float d) { return pc.a.w / ((pc.b.z > 0.5 ? d * 2.0 - 1.0 : d) + pc.a.z); }\n";
-        // b.x = radius (world units), b.y = intensity, b.w = the largest screen radius in pixels. 16 samples on a
+        // b.x = radius (world units), b.y = intensity, b.w = the largest screen radius in pixels. c.y samples (8-16) on a
         // spiral turned per pixel (interleaved gradient noise; the blur evens it out), denser near the centre;
         // c.x turns it per frame too (temporal accumulation: other directions every frame).
         static const char *ao =
@@ -457,14 +457,15 @@ static const char *builtin_src(const char *name, int *stage) {
             "  if (rpx < 1.0) { o = vec4(1.0); return; }\n"
             "  float ang = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + pc.c.x);\n"
             "  float occ = 0.0, bias = 0.02 * c.z;\n"
-            "  for (int i = 0; i < 16; i++) {\n"
-            "    float t = (float(i) + 0.5) / 16.0, a = ang + float(i) * 2.39996323;\n"
+            "  int ns = int(pc.c.y);\n"
+            "  for (int i = 0; i < ns; i++) {\n"
+            "    float t = (float(i) + 0.5) / float(ns), a = ang + float(i) * 2.39996323;\n"
             "    vec3 v = vpos(p + ivec2(vec2(cos(a), sin(a)) * (t * rpx + 1.0))) - c;\n"
             "    float vv = dot(v, v);\n"
             "    float cosv = (dot(v, n) - bias) * inversesqrt(vv + 1e-3);\n"
             "    occ += max(cosv, 0.0) * clamp(1.0 - vv / (rad * rad), 0.0, 1.0);\n"
             "  }\n"
-            "  o = vec4(clamp(1.0 - pc.b.y * occ * (2.0 / 16.0), 0.0, 1.0), 0.0, 0.0, 1.0);\n"
+            "  o = vec4(clamp(1.0 - pc.b.y * occ * (2.0 / float(ns)), 0.0, 1.0), 0.0, 0.0, 1.0);\n"
             "}\n";
         // Depth-aware blur along b.xy (one texel steps), 9 taps: neighbours more than a few % farther or nearer than
         // the centre don't count (no halo around silhouettes).
@@ -832,6 +833,37 @@ static const char *builtin_src(const char *name, int *stage) {
                "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
                "  vec3 d = abs(texelFetch(t0, p, 0).rgb - texelFetch(t1, min(p, textureSize(t1, 0) - 1), 0).rgb);\n"
                "  o = vec4(max(d.r, max(d.g, d.b)) > 2.0 / 255.0 ? 1.0 : 0.0);\n"
+               "}\n";
+    }
+    // Frame generation's image without the interface (exec.c post_process): FSR 3's output (t0) where the interface
+    // mask (t2) is clear, and the image from before the interface (t1, at the render size) where it is not.
+    // b.xy = 1 / the output's size.
+    if (!strcmp(name, "hudless.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t0;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D t1;\n"
+               "layout(set = 0, binding = 2) uniform sampler2D t2;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  vec2 uv = gl_FragCoord.xy * pc.b.xy;\n"
+               "  o = vec4(texture(t2, uv).r > 0.0 ? texture(t1, uv).rgb : texture(t0, uv).rgb, 1.0);\n"
+               "}\n";
+    }
+    // An image upside down, its .y times a.x (exec.c post_process: frame generation's depth and motion vectors in the
+    // window's orientation - the present flips the game image when its origin is the lower left)
+    if (!strcmp(name, "flip_y.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  ivec2 sz = textureSize(t, 0), p = ivec2(gl_FragCoord.xy);\n"
+               "  vec4 v = texelFetch(t, ivec2(p.x, sz.y - 1 - p.y), 0);\n"
+               "  v.y *= pc.a.x;\n"
+               "  o = v;\n"
                "}\n";
     }
     // The scene depth as R32F (FSR 3 reads a colour image: exec.c post_process)

@@ -2,6 +2,8 @@
 // write to it raises an access violation, a vectored handler logs the writer's backtrace (the guest functions show as
 // f_<address>), makes the page writable, single-steps the store and protects the page again. Windows only.
 //  LARECOMP_WATCH=<addr>[,<addr>...]        watch these 32-bit words (hex guest addresses) from the start
+//  LARECOMP_WATCH_AT=<present>              ... from that present on instead (a heap object not there at the start)
+//  LARECOMP_WATCH_MAX=<n>                   log only the first n writes (default: all)
 //  LARECOMP_WATCH_PARTY=<present>           at that present, look for the party's Pokémon (the 0x104-byte PB7 records: species
 //                                           u16 at +8, experience u32 at +0x10, level byte at +0xEC) and watch every
 //                                           experience word found: catching a Pokémon then shows who awards the experience
@@ -35,8 +37,12 @@ static LONG CALLBACK veh(EXCEPTION_POINTERS *ep) {
     if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2 && r->ExceptionInformation[0] == 1) {
         uint64_t a = (uint64_t)r->ExceptionInformation[1], page = a & ~0xfffull;
         if (!watched_page(page)) return EXCEPTION_CONTINUE_SEARCH;
-        for (int i = 0; i < g_n; i++) {
-            if (a >= g_addr[i] && a < g_addr[i] + 4) {
+        static long max = -2;
+        static volatile long logged;
+        if (max == -2) max = getenv("LARECOMP_WATCH_MAX") ? atol(getenv("LARECOMP_WATCH_MAX")) : -1;
+        for (int i = 0; i < g_n && (max < 0 || logged < max); i++) {
+            if (a + 16 > g_addr[i] && a < g_addr[i] + 4) {  // (a store of up to 16 bytes starting before the word: SIMD vectors)
+                logged++;
                 LOG("[watch] f%llu write to %llx (was %08x)\n", (unsigned long long)renderer_game_frame(), (unsigned long long)g_addr[i],
                     *(volatile uint32_t *)(uintptr_t)g_addr[i]);
                 plat_print_backtrace();
@@ -193,9 +199,45 @@ static DWORD WINAPI snap_thread(LPVOID arg) {
     return 0;
 }
 
+static DWORD WINAPI watch_at_thread(LPVOID arg) {
+    long at = (long)(intptr_t)arg;
+    while ((long)renderer_game_frame() < at) Sleep(1);
+    const char *w = getenv("LARECOMP_WATCH");
+    for (const char *p = w; *p;) {
+        watch(strtoull(p, (char **)&p, 16));
+        while (*p == ',' || *p == ' ') p++;
+    }
+    return 0;
+}
+
+// LARECOMP_WATCH_LIKE=<present>:<addr>: at that present, every word of the heaps holding the value at addr now (another
+// copy of a position: which one the game computes, and where) is watched (up to MAXW)
+// (called at each present on the game thread, runtime/hle/fps60.c: the values hold still while it scans)
+void memwatch_present(void) {
+    const char *e = getenv("LARECOMP_WATCH_LIKE");
+    if (!e || (long)renderer_game_frame() != atol(e)) return;
+    uint64_t src = strchr(e, ':') ? strtoull(strchr(e, ':') + 1, NULL, 16) : 0;
+    uint32_t v = *(volatile uint32_t *)(uintptr_t)src;
+    int found = 0;
+    for (uint64_t a = 0x7200000000ull; a < 0x7800000000ull;) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery((void *)(uintptr_t)a, &mbi, sizeof mbi)) break;
+        uint64_t base = (uint64_t)(uintptr_t)mbi.BaseAddress, size = mbi.RegionSize;
+        if (mbi.State == MEM_COMMIT && mbi.Protect == PAGE_READWRITE)
+            for (uint64_t o = 0; o + 4 <= size; o += 4)
+                if (*(const uint32_t *)(uintptr_t)(base + o) == v) {
+                    LOG("[watch] %08x also at %llx\n", v, (unsigned long long)(base + o));
+                    if (found++ < MAXW) watch(base + o);
+                }
+        a = base + size;
+    }
+    LOG("[watch] %d word(s) like %llx\n", found, (unsigned long long)src);
+}
+
 __attribute__((constructor)) static void memwatch_init(void) {
     const char *w = getenv("LARECOMP_WATCH");
-    if (w) {
+    if (w && getenv("LARECOMP_WATCH_AT")) CreateThread(NULL, 0, watch_at_thread, (LPVOID)(intptr_t)atol(getenv("LARECOMP_WATCH_AT")), 0, NULL);
+    else if (w) {
         for (const char *p = w; *p;) {
             watch(strtoull(p, (char **)&p, 16));
             while (*p == ',' || *p == ' ') p++;
