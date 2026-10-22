@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Wild battles: the launcher says when they happen** (issue #22): only while another Pokémon from the party walks with
+  the player, not the starter; otherwise it is the game's capture (since 0.4.2: without that Pokémon the battle broke,
+  issue #6). The option's tip said nothing of it, and with Pikachu on the shoulder and no one walking along it looked
+  like it did nothing.
+
 ## 0.6.0 (2026-10-22)
 
 Iván Serrano's ([@Vancete](https://github.com/Vancete), PRs #17 and #19): the in-house frame generation, SSAO Ultra,
