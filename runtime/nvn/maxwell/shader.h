@@ -9,7 +9,9 @@
 //  - global memory (LDG/STG) -> binding GMEM_BUFFER_INDEX (17):
 //    `layout(std430, set=S, binding=17) [readonly] buffer GMem { uint w[]; } gmem_;`, 32-bit words relative to
 //    maxwell_gmem_base. `readonly` unless the shader stores (needs vertexPipeline/fragmentStoresAndAtomics then);
-//    byte / short stores are atomicAnd + atomicOr on the containing word.
+//    byte / short stores are atomicAnd + atomicOr on the containing word. With maxwell_gmem_chunk_shift set (Android),
+//    `readonly buffer GMem { uint64_t base[]; } gmem_;` instead: the device address of each chunk, word i read
+//    through a GL_EXT_buffer_reference (GW(i)).
 //  - rscale table -> binding 18: `uniform RScale { vec4 rscale[65]; };` (std140, the MSL buffer 18 contents).
 //  - per-draw tint -> binding 19: `uniform Tint { vec4 ltint[2]; };` (fragment, when uses_tint).
 //  - texture slot i (ShaderInfo.tex[i]) -> binding 32 + i, a combined image sampler: sampler1D/2D/3D/Cube/
@@ -90,6 +92,7 @@ typedef struct {
 // Global memory (LDG/STG) is addressed through one buffer that wraps the guest heap.
 #define GMEM_BUFFER_INDEX 17
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
+extern int maxwell_gmem_chunk_shift;  // (translate.c: global memory in chunks reached by device address, Android)
 // Debug: when translating the shader whose code starts at maxwell_dbg_code, output register
 // maxwell_dbg_reg as captured after the instruction at maxwell_dbg_pc (greyscale, all targets).
 extern const uint8_t *maxwell_dbg_code;

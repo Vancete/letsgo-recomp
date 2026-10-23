@@ -385,7 +385,9 @@ static void window_as_launcher(SDL_Window *win) {
     SDL_GetWindowSize(win, &w, &h);
     if (!(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) && w > 0 && h > 0 && !getenv("LARECOMP_LAUNCHER_SHOT")) g_game_w = w, g_game_h = h;
     if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &g_game_w, &g_game_h);
+#ifndef __ANDROID__  // (a phone has no window: always the whole screen)
     SDL_SetWindowFullscreen(win, false);
+#endif
     SDL_Rect usable = {0, 0, 1920, 1040};
     SDL_GetDisplayUsableBounds(SDL_GetDisplayForWindow(win), &usable);
     int lh = usable.h * 86 / 100 < 900 ? usable.h * 86 / 100 : 900, lw = lh * 86 / 100;
@@ -532,8 +534,14 @@ extern "C" void launcher_lg_run(const char *root) {
         }
         ImGui_ImplVulkan_NewFrame();
         ImGui_ImplSDL3_NewFrame();
-        // (the launcher is narrow: its fonts a little smaller than the F12 menu's at the same height)
-        g_scale = ui_scale(scaler, io.DisplaySize.y * 0.86f);
+        // (the launcher is narrow: its fonts a little smaller than the F12 menu's at the same height; on a phone's dense
+        // screen, twice as large)
+#ifdef __ANDROID__
+        const float zoom = 2.0f;
+#else
+        const float zoom = 1.0f;
+#endif
+        g_scale = ui_scale(scaler, io.DisplaySize.y * 0.86f * zoom);
         ImGui::NewFrame();
         float s = g_scale;
         bool known = !setup_ready() || game_build("extracted/exefs") != GAME_BUILD_OTHER;
@@ -621,6 +629,7 @@ extern "C" void launcher_lg_run(const char *root) {
                           ImGuiWindowFlags_NoScrollbar);
         {
             ui_title(fonts.title, names[tab]);
+#ifndef __ANDROID__  // (a phone has no window to minimise or close: the system's own buttons)
             {   // the window's buttons in its top right corner, side by side on one line (placed, not flowed after the title)
                 ImVec2 back = ImGui::GetCursorScreenPos(), wp = ImGui::GetWindowPos();
                 float bsz = 40 * s, gap = 6 * s, x = wp.x + ImGui::GetWindowWidth() - cpad - bsz * 2 - gap, y = wp.y + pad * 0.6f;
@@ -630,6 +639,7 @@ extern "C" void launcher_lg_run(const char *root) {
                 if (window_button("##close", true, bsz)) exit(0);
                 ImGui::SetCursorScreenPos(back);
             }
+#endif
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 16 * s - ImGui::GetStyle().ItemSpacing.y);  // (16 px to the page)
             ui_page_begin("##page", ImVec2(0, 0));
             if (tab == TAB_GAME) {

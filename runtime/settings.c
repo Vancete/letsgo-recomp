@@ -17,7 +17,12 @@ static const char *settings_file(void) {
 }
 
 Settings g_settings = {
+#ifdef __ANDROID__  // (a phone: the whole screen, and the Switch's 720 lines - its GPU's cost goes with the pixels)
+    .fullscreen = true,
+    .res_height = 720,
+#else
     .fullscreen = false,
+#endif
     .fps = 30,
     .volume = 1.0f,
     .brightness = 1.0f,
@@ -197,6 +202,9 @@ void settings_load(void) {
         }
     }
     fclose(f);
+#ifdef __ANDROID__
+    g_settings.fullscreen = true;  // (no window on a phone)
+#endif
     if (g_settings.volume < 0) g_settings.volume = 0;
     if (g_settings.volume > 2) g_settings.volume = 2;
     settings_clamp_color();

@@ -223,7 +223,7 @@ static int trigger_hook(Cpu *c, uint64_t addr) {
     if (getenv("LARECOMP_WILDBATTLE_PROBE")) probe_identity(c);
     uint64_t lr = c->x[30];
     uint64_t mgr = R64(R64(c->x[1], 0), 0x68);
-    uint64_t alloc = R64(R64(R64(GOT_ALLOCATOR, 0), 0), 0x68);
+    uint64_t alloc = R64(R64(R64(GA(GOT_ALLOCATOR), 0), 0), 0x68);
     LOG("[wild] f%llu encounter intercepted (pokemon obj %llx, manager %llx, allocator %llx): building the static battle process\n",
         (unsigned long long)renderer_game_frame(), (unsigned long long)c->x[0], (unsigned long long)mgr, (unsigned long long)alloc);
     uint64_t out[2] = {0, 0};
@@ -291,7 +291,7 @@ static int field_hook(Cpu *c, uint64_t addr) {
         g_fadein_done = true;
         uint64_t save[32], lr = c->x[30], sp = c->sp;
         memcpy(save, c->x, sizeof save);
-        c->x[0] = R64(R64(GOT_FADE, 0), 0);
+        c->x[0] = R64(R64(GA(GOT_FADE), 0), 0);
         c->x[1] = 0;
         c->x[2] = (uint64_t)g_fade_type;
         c->x[3] = (uint64_t)g_fadein_frames;

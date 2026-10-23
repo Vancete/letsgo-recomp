@@ -1,8 +1,15 @@
 // Executes recorded NVN command lists with Vulkan (port of renderer.m; same structure, same behaviour).
 #include <SDL3/SDL_cpuinfo.h>
+#if defined(__x86_64__)
 #include <immintrin.h>
+#elif defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 #include <SDL3/SDL_timer.h>
 #include <float.h>
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
 #include <math.h>
 #include <stdarg.h>
 #include <pthread.h>
@@ -77,14 +84,33 @@ uint64_t vk_completed_seq(void) {
     return v;
 }
 
-void vk_wait_seq(uint64_t seq) {
+// LARECOMP_VK_PROF: the GPU waits by caller in the stats line ("waits": offset in this library for addr2line: ms/count)
+static struct { uintptr_t ra; uint64_t ns, n; } wsite[16];
+void vk_wait_sites_log(char *out, size_t cap) {
+    uintptr_t base = 0;  // (Windows: absolute addresses)
+#ifndef _WIN32
+    Dl_info di = {0};
+    if (dladdr((void *)vk_wait_sites_log, &di)) base = (uintptr_t)di.dli_fbase;
+#endif
+    size_t o = 0;
+    for (int i = 0; i < 16 && wsite[i].ra; i++) {
+        o += (size_t)snprintf(out + o, o < cap ? cap - o : 0, " %lx:%.0fms/%llu", (unsigned long)(wsite[i].ra - base),
+                              wsite[i].ns / 1e6, (unsigned long long)wsite[i].n);
+        wsite[i].ns = wsite[i].n = 0;
+    }
+}
+
+__attribute__((noinline)) void vk_wait_seq(uint64_t seq) {
     if (!seq) return;
+    uintptr_t ra = (uintptr_t)__builtin_return_address(0);
     VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_vk.timeline,
                               .pValues = &seq};
     uint64_t t0 = SDL_GetTicksNS();
     VkResult r = vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
     stat_wait_ns += SDL_GetTicksNS() - t0;
     cum_wait += SDL_GetTicksNS() - t0;
+    for (int i = 0; i < 16; i++)
+        if (wsite[i].ra == ra || !wsite[i].ra) { wsite[i].ra = ra; wsite[i].ns += SDL_GetTicksNS() - t0; wsite[i].n++; break; }
     if (r == VK_TIMEOUT) LOG("[vk] GPU did not finish submission %llu within 10 s (device lost?)\n", (unsigned long long)seq);
     else if (r != VK_SUCCESS) {
         extern void vk_devlost_dump(void);
@@ -376,8 +402,9 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
 
 // ================================================================== transient memory ring
 // The largest index of a draw (bounds the vertex data copied for it), ignoring the restart value: AVX2 where the CPU has it (the
-// game code needs it too), a plain loop elsewhere. A draw scans a few thousand indices: ~1.4 us scalar, ~0.15 us here.
-__attribute__((target("avx2"))) static uint32_t scan_max16_avx2(const uint16_t *q, uint32_t n, uint16_t restart) {
+// game code needs it too), NEON on AArch64, a plain loop elsewhere. A draw scans a few thousand indices: ~1.4 us scalar, ~0.15 us here.
+#if defined(__x86_64__)
+__attribute__((target("avx2"))) static uint32_t scan_max16_simd(const uint16_t *q, uint32_t n, uint16_t restart) {
     __m256i acc = _mm256_setzero_si256(), rs = _mm256_set1_epi16((short)restart);
     uint32_t i = 0;
     for (; i + 16 <= n; i += 16) {
@@ -391,7 +418,7 @@ __attribute__((target("avx2"))) static uint32_t scan_max16_avx2(const uint16_t *
     for (; i < n; i++) if (q[i] != restart && q[i] > m) m = q[i];
     return m;
 }
-__attribute__((target("avx2"))) static uint32_t scan_max32_avx2(const uint32_t *q, uint32_t n, uint32_t restart) {
+__attribute__((target("avx2"))) static uint32_t scan_max32_simd(const uint32_t *q, uint32_t n, uint32_t restart) {
     __m256i acc = _mm256_setzero_si256(), rs = _mm256_set1_epi32((int)restart);
     uint32_t i = 0;
     for (; i + 8 <= n; i += 8) {
@@ -405,16 +432,46 @@ __attribute__((target("avx2"))) static uint32_t scan_max32_avx2(const uint32_t *
     for (; i < n; i++) if (q[i] != restart && q[i] > m) m = q[i];
     return m;
 }
+#elif defined(__aarch64__)
+static uint32_t scan_max16_simd(const uint16_t *q, uint32_t n, uint16_t restart) {
+    uint16x8_t acc = vdupq_n_u16(0), rs = vdupq_n_u16(restart);
+    uint32_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint16x8_t v = vld1q_u16(q + i);
+        acc = vmaxq_u16(acc, vbicq_u16(v, vceqq_u16(v, rs)));
+    }
+    uint32_t m = vmaxvq_u16(acc);
+    for (; i < n; i++) if (q[i] != restart && q[i] > m) m = q[i];
+    return m;
+}
+static uint32_t scan_max32_simd(const uint32_t *q, uint32_t n, uint32_t restart) {
+    uint32x4_t acc = vdupq_n_u32(0), rs = vdupq_n_u32(restart);
+    uint32_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        uint32x4_t v = vld1q_u32(q + i);
+        acc = vmaxq_u32(acc, vbicq_u32(v, vceqq_u32(v, rs)));
+    }
+    uint32_t m = vmaxvq_u32(acc);
+    for (; i < n; i++) if (q[i] != restart && q[i] > m) m = q[i];
+    return m;
+}
+#endif
 static uint32_t scan_max_index_(const void *src, uint32_t isz, uint32_t n, uint32_t restart) {
-    static int avx2 = -1;
-    if (avx2 < 0) avx2 = __builtin_cpu_supports("avx2");
+#if defined(__x86_64__)
+    static int simd = -1;
+    if (simd < 0) simd = __builtin_cpu_supports("avx2");
+#elif defined(__aarch64__)
+    const int simd = 1;
+#else
+    const int simd = 0;
+#endif
     uint32_t m = 0;
     if (isz == 2) {
-        if (avx2) return scan_max16_avx2(src, n, (uint16_t)restart);
+        if (simd) return scan_max16_simd(src, n, (uint16_t)restart);
         const uint16_t *q = src;
         for (uint32_t i = 0; i < n; i++) if (q[i] > m && q[i] != (uint16_t)restart) m = q[i];
     } else {
-        if (avx2) return scan_max32_avx2(src, n, restart);
+        if (simd) return scan_max32_simd(src, n, restart);
         const uint32_t *q = src;
         for (uint32_t i = 0; i < n; i++) if (q[i] > m && q[i] != restart) m = q[i];
     }
@@ -448,7 +505,9 @@ static bool ring_gpu_enabled(void) {
         if (!e) e = g_settings.vertex_read == VREAD_DIRECT ? "direct" : g_settings.vertex_read == VREAD_COPY ? "copy" : NULL;
         if (e && !strcmp(e, "direct")) on = 0;
         else if (e && (!strcmp(e, "copy") || !strcmp(e, "hybrid"))) on = 1;
-        else on = g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        // (Android, the memory pools in GPU memory: uncached, slow for the GPU's vertex fetch - the world's frame took twice the
+        // GPU time read in place - and every buffer copy of the game waited for the GPU to be idle, 15 a frame)
+        else on = g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU || g_vk.heap_export;
         LOG("[vk] vertex and index data: %s\n", on ? "copied to VRAM (ranges the GPU writes are read in place)" : "read in place from the game's memory");
     }
     return on;
@@ -670,7 +729,11 @@ static void acopy_drain(void) {
     if (atomic_load(&acq_done) >= want) return;
     PROF_T0();
     while (acopy_take_one()) {}
+#if defined(__x86_64__)
     while (atomic_load(&acq_done) < want) __builtin_ia32_pause();
+#else
+    while (atomic_load(&acq_done) < want) __asm__ volatile("yield");
+#endif
     PROF_ADD(prof_gcpy_wait_ns);
 }
 static void acopy_push(void *dst, const void *src, uint64_t n) {
@@ -1130,6 +1193,10 @@ const char *renderer_stats(void) {
             }
         memset(prof_op_ns, 0, sizeof prof_op_ns);
         memset(prof_op_n, 0, sizeof prof_op_n);
+        n = strlen(stats_text);
+        snprintf(stats_text + n, sizeof stats_text - n, " | waits:");
+        n = strlen(stats_text);
+        vk_wait_sites_log(stats_text + n, sizeof stats_text - n);
         prof_tex_checks = prof_tex_samples = prof_tex_full = prof_tex_full_bytes = prof_tex_dyn = 0;
         prof_exec = prof_draw = prof_sets = prof_vtx = prof_submit = prof_pre = prof_key = prof_dyn = prof_tex = prof_up = prof_gpu = prof_ipc = 0;
     }
@@ -1759,10 +1826,13 @@ static void fx_patch_fs(Prog *p) {
                          (unsigned long long)h, (int)n, mode == FX_DOWN ? "13-tap downsample" : mode == FX_SOFT ? "rotated-grid" : "B-spline");
 }
 
+static uint64_t gmem_limit(void);
+static int gmem_chunk_shift(void);
 static void translate_program(void *arg) {
     Prog *p = arg;
     maxwell_gmem_base = HEAP_BASE;
-    maxwell_gmem_size = HEAP_MAX;
+    maxwell_gmem_size = gmem_limit();
+    maxwell_gmem_chunk_shift = gmem_chunk_shift();
     uint64_t t0 = SDL_GetTicksNS();
     p->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], STAGE_VERTEX, &p->vkey);
     // Experiment (research): LARECOMP_EXP_VS_EARLY=<vertex program address, hex>: that program's vertex shader returns at
@@ -2205,7 +2275,7 @@ static void pipe_exec_report(VkPipeline pipe, uint64_t vs, uint64_t fs) {
         if (ns > 64) ns = 64;
         for (uint32_t s = 0; s < ns; s++) stats[s].sType = VK_STRUCTURE_TYPE_PIPELINE_EXECUTABLE_STATISTIC_KHR;
         if (get_stats(g_vk.dev, &einfo, &ns, stats) != VK_SUCCESS) continue;
-        char line[1024];
+        char line[4096];
         int l = snprintf(line, sizeof line, "[pipestats] vs %llx fs %llx  %s (stages %#x):", (unsigned long long)vs, (unsigned long long)fs,
                          props[i].name, props[i].stages);
         for (uint32_t s = 0; s < ns && l < (int)sizeof line - 80; s++) {
@@ -2769,6 +2839,7 @@ static VkDeviceMemory gmem_mem;
 static uint64_t gmem_size;
 
 static bool gmem_import(uint64_t size) {
+    if (g_vk.heap_export) return false;  // (Android: the heap is GPU memory itself, renderer_share_heap)
     PFN_vkGetMemoryHostPointerPropertiesEXT props =
         (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryHostPointerPropertiesEXT");
     VkMemoryHostPointerPropertiesEXT mp = {.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
@@ -2805,11 +2876,267 @@ static bool gmem_import(uint64_t size) {
 
 static uint64_t gmem_tried;  // heap size the import was last attempted for (gmem_info imports / re-imports)
 
+// ---- the game's memory pools in GPU memory (Android). Its drivers can't import process memory (no
+// VK_EXT_external_memory_host), so the memory the GPU reads in place - what the game puts in its NVN memory pools, as on
+// the Switch, where the GPU sees nothing else - becomes GPU memory itself: when the game makes a pool, its pages get an
+// exportable allocation (pieces of at most maxMemoryAllocationSize) holding what they had, mapped over them from its fd
+// (VK_KHR_external_memory_fd); when it finalizes one, its pages go back to plain memory. Not the whole heap: the driver
+// commits a whole allocation at once (+2.2 GB of RAM for the 3.2 GB heap, measured). The game's code sees memory as
+// before. Shaders reach a page through a table of device addresses, one per heap page (maxwell_gmem_chunk_shift 12,
+// gmem_info binds it; pages outside pools: one zero page); in-place reads through the piece's buffer (guest_direct).
+#ifdef __ANDROID__
+#include <errno.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#define PAGE_SHIFT_GM 12
+typedef struct { uint64_t at, n, free_after; VkBuffer buf; VkDeviceMemory mem; } HeapPiece;
+static pthread_mutex_t pieces_lk = PTHREAD_MUTEX_INITIALIZER;
+static HeapPiece *pieces, *dead;  // live pieces by address; finalized ones, freed once the GPU is past them
+static int npieces, cap_pieces, ndead, cap_dead;
+static VkBuffer ptab_buf, zero_buf;
+static uint64_t *ptab;             // per heap page: its device address (the zero page outside pools)
+static VkDeviceAddress zero_page;
+static uint64_t piece_max;         // largest allocation
+static uint64_t pool_bytes;        // in GPU memory now
+
+static uint32_t heap_memory_type(uint32_t bits, bool host_only) {
+    static int forced = -2;  // LARECOMP_VK_HEAP_TYPE=<index>: that memory type for the pools (measurements)
+    if (forced == -2) forced = getenv("LARECOMP_VK_HEAP_TYPE") ? atoi(getenv("LARECOMP_VK_HEAP_TYPE")) : -1;
+    if (!host_only && forced >= 0 && forced < 32 && (bits >> forced & 1)) return (uint32_t)forced;
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+    const VkMemoryPropertyFlags want[] = {  // (cached first; exportable memory on Adreno: uncached only)
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
+    for (int w = 0; w < 2; w++)
+        for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
+            if ((bits >> i & 1) && (mp.memoryTypes[i].propertyFlags & want[w]) == want[w]) return i;
+    return UINT32_MAX;
+}
+
+// A buffer over its own host-visible allocation, with a device address; exp: exportable (its fd in *fd).
+static bool gm_alloc(uint64_t n, bool exp, VkBuffer *buf, VkDeviceMemory *mem, void **map, int *fd, uint32_t *type_out) {
+    VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+                                           .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT};
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = exp ? &eb : NULL, .size = n,
+                             .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
+                                      VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
+    if (vkCreateBuffer(g_vk.dev, &bi, NULL, buf) != VK_SUCCESS) return false;
+    VkMemoryRequirements mr;
+    vkGetBufferMemoryRequirements(g_vk.dev, *buf, &mr);
+    uint32_t type = heap_memory_type(mr.memoryTypeBits, !exp);
+    VkMemoryAllocateFlagsInfo fl = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO, .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
+    VkMemoryDedicatedAllocateInfo ded = {.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .pNext = &fl, .buffer = *buf};
+    VkExportMemoryAllocateInfo ex = {.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO, .pNext = &ded,
+                                     .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT};
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = exp ? (void *)&ex : (void *)&ded,
+                               .allocationSize = mr.size, .memoryTypeIndex = type};
+    if (type == UINT32_MAX || vkAllocateMemory(g_vk.dev, &ai, NULL, mem) != VK_SUCCESS) {
+        vkDestroyBuffer(g_vk.dev, *buf, NULL);
+        return false;
+    }
+    vkBindBufferMemory(g_vk.dev, *buf, *mem, 0);
+    *map = NULL, *fd = -1;
+    PFN_vkGetMemoryFdKHR get_fd = exp ? (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryFdKHR") : NULL;
+    VkMemoryGetFdInfoKHR fi = {.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, .memory = *mem,
+                               .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT};
+    if (vkMapMemory(g_vk.dev, *mem, 0, VK_WHOLE_SIZE, 0, map) != VK_SUCCESS || (exp && (!get_fd || get_fd(g_vk.dev, &fi, fd) != VK_SUCCESS))) {
+        if (*map) vkUnmapMemory(g_vk.dev, *mem);
+        vkDestroyBuffer(g_vk.dev, *buf, NULL);
+        vkFreeMemory(g_vk.dev, *mem, NULL);
+        return false;
+    }
+    if (type_out) *type_out = type;
+    return true;
+}
+static VkDeviceAddress gm_address(VkBuffer buf) {
+    VkBufferDeviceAddressInfo da = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = buf};
+    return vkGetBufferDeviceAddress(g_vk.dev, &da);
+}
+
+// The page table and the zero page, when the game sets its heap up (kernel.c SetHeapSize; again after an in-place reboot).
+uint64_t renderer_share_heap(uint64_t lo, uint64_t size) {
+    (void)lo, (void)size;
+    if (!g_vk.dev || !g_vk.heap_export || getenv("LARECOMP_VK_NO_GMEM") || ptab) return 0;
+    VkDeviceMemory mem;
+    void *zmap;
+    int fd;
+    uint64_t tn = (HEAP_MAX >> PAGE_SHIFT_GM) * 8;
+    if (!gm_alloc(tn, false, &ptab_buf, &mem, (void **)&ptab, &fd, NULL)) { LOG("[vk] no page table for the pools: shader global memory reads return zero\n"); return 0; }
+    if (!gm_alloc(1 << PAGE_SHIFT_GM, false, &zero_buf, &mem, &zmap, &fd, NULL)) {
+        LOG("[vk] no zero page for the pools: shader global memory reads return zero\n");
+        ptab = NULL;  // (the table's allocation stays)
+        return 0;
+    }
+    memset(zmap, 0, 1 << PAGE_SHIFT_GM);
+    zero_page = gm_address(zero_buf);
+    for (uint64_t i = 0; i < tn / 8; i++) ptab[i] = zero_page;
+    VkPhysicalDeviceMaintenance3Properties m3 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES};
+    VkPhysicalDeviceProperties2 pp = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &m3};
+    vkGetPhysicalDeviceProperties2(g_vk.phys, &pp);
+    piece_max = m3.maxMemoryAllocationSize & ~0xFFFFull;
+    LOG("[vk] memory pools in GPU memory for shader global memory (pieces of up to %llu MB)\n", (unsigned long long)(piece_max >> 20));
+    return 0;
+}
+
+static void reap_dead(bool all) {  // (pieces_lk held)
+    uint64_t done = all ? UINT64_MAX : vk_completed_seq();
+    int k = 0;
+    for (int i = 0; i < ndead; i++) {
+        if (dead[i].free_after <= done) {
+            vkDestroyBuffer(g_vk.dev, dead[i].buf, NULL);
+            vkFreeMemory(g_vk.dev, dead[i].mem, NULL);
+        } else dead[k++] = dead[i];
+    }
+    ndead = k;
+}
+
+// One piece of a pool: [at, at + n) into GPU memory, keeping what it holds.
+static bool piece_make(uint64_t at, uint64_t n) {
+    HeapPiece p = {.at = at, .n = n};
+    void *drv;
+    int fd;
+    uint32_t type;
+    if (!gm_alloc(n, true, &p.buf, &p.mem, &drv, &fd, &type)) return false;
+    static int checked;
+    memcpy(drv, (void *)(uintptr_t)at, n);
+    bool ok = mmap((void *)(uintptr_t)at, n, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) != MAP_FAILED;
+    if (ok && !checked) {  // (the first time: the fd's mapping is the driver's memory)
+        volatile uint32_t *here = (volatile uint32_t *)(uintptr_t)at, keep = here[0];
+        here[0] = keep ^ 0x5a5a5a5au;
+        ok = ((volatile uint32_t *)drv)[0] == (keep ^ 0x5a5a5a5au);
+        here[0] = keep;
+        if (!ok) mmap((void *)(uintptr_t)at, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0),
+                 memcpy((void *)(uintptr_t)at, drv, n);
+        LOG("[vk] memory pools: %s (memory type %u)\n", ok ? "their GPU memory mapped in place" : "the fd's mapping is not the GPU memory", type);
+        checked = ok ? 1 : -1;
+    }
+    close(fd);  // (the mapping stays)
+    vkUnmapMemory(g_vk.dev, p.mem);
+    if (!ok) {
+        vkDestroyBuffer(g_vk.dev, p.buf, NULL);
+        vkFreeMemory(g_vk.dev, p.mem, NULL);
+        return false;
+    }
+    VkDeviceAddress a = gm_address(p.buf);
+    uint64_t pg = (at - HEAP_BASE) >> PAGE_SHIFT_GM;
+    for (uint64_t k = 0; k < n >> PAGE_SHIFT_GM; k++) ptab[pg + k] = a + (k << PAGE_SHIFT_GM);
+    pthread_mutex_lock(&pieces_lk);
+    if (npieces == cap_pieces) pieces = realloc(pieces, sizeof *pieces * (size_t)(cap_pieces = cap_pieces ? cap_pieces * 2 : 1024));
+    int i = npieces;
+    while (i > 0 && pieces[i - 1].at > at) i--;
+    memmove(&pieces[i + 1], &pieces[i], sizeof *pieces * (size_t)(npieces - i));
+    pieces[i] = p;
+    npieces++;
+    pool_bytes += n;
+    pthread_mutex_unlock(&pieces_lk);
+    return true;
+}
+
+// nvnMemoryPoolInitialize (objects.c): a pool in the heap, page-aligned, goes into GPU memory.
+void backend_pool_created(uint64_t addr, uint64_t size) {
+    if (!ptab || addr < HEAP_BASE || addr + size > HEAP_BASE + HEAP_MAX || !size || ((addr | size) & ((1 << PAGE_SHIFT_GM) - 1))) return;
+    pthread_mutex_lock(&pieces_lk);
+    reap_dead(false);
+    pthread_mutex_unlock(&pieces_lk);
+    for (uint64_t off = 0; off < size;) {
+        uint64_t n = size - off < piece_max ? size - off : piece_max;
+        if (!piece_make(addr + off, n)) {
+            static int nlog;
+            if (nlog++ < 8) LOG("[vk] pool %llx (%llu KB) not in GPU memory: shader reads of it return zero\n", (unsigned long long)addr,
+                                (unsigned long long)(size >> 10));
+        }
+        off += n;
+    }
+}
+
+// nvnMemoryPoolFinalize (objects.c, after rt_drain): its pages back to plain memory, keeping what they hold; the GPU
+// memory is freed once the GPU is past everything submitted so far.
+void backend_pool_destroyed(uint64_t addr, uint64_t size) {
+    if (!ptab) return;
+    pthread_mutex_lock(&pieces_lk);
+    int k = 0;
+    for (int i = 0; i < npieces; i++) {
+        HeapPiece *p = &pieces[i];
+        if (p->at < addr || p->at >= addr + size) { pieces[k++] = *p; continue; }
+        uint64_t pg = (p->at - HEAP_BASE) >> PAGE_SHIFT_GM;
+        for (uint64_t j = 0; j < p->n >> PAGE_SHIFT_GM; j++) ptab[pg + j] = zero_page;
+        void *tmp = malloc(p->n);
+        if (tmp) memcpy(tmp, (void *)(uintptr_t)p->at, p->n);
+        mmap((void *)(uintptr_t)p->at, p->n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
+        if (tmp) memcpy((void *)(uintptr_t)p->at, tmp, p->n), free(tmp);
+        pthread_mutex_lock(&seq_lock);
+        p->free_after = submit_seq + 1;  // (work recorded but not submitted yet goes with the next submission)
+        pthread_mutex_unlock(&seq_lock);
+        if (ndead == cap_dead) dead = realloc(dead, sizeof *dead * (size_t)(cap_dead = cap_dead ? cap_dead * 2 : 256));
+        dead[ndead++] = *p;
+        pool_bytes -= p->n;
+    }
+    npieces = k;
+    reap_dead(false);
+    pthread_mutex_unlock(&pieces_lk);
+}
+
+// In-place reboot (vk_exec_reset, GPU idle; guest memory is replaced next): every piece freed, the table cleared.
+static void pools_reset(void) {
+    if (!ptab) return;
+    pthread_mutex_lock(&pieces_lk);
+    for (int i = 0; i < npieces; i++) {
+        pieces[i].free_after = 0;
+        if (ndead == cap_dead) dead = realloc(dead, sizeof *dead * (size_t)(cap_dead = cap_dead ? cap_dead * 2 : 256));
+        dead[ndead++] = pieces[i];
+    }
+    npieces = 0, pool_bytes = 0;
+    reap_dead(true);
+    for (uint64_t i = 0; i < HEAP_MAX >> PAGE_SHIFT_GM; i++) ptab[i] = zero_page;
+    pthread_mutex_unlock(&pieces_lk);
+}
+
+// The piece holding [addr, addr + size) (false: not in a pool's GPU memory).
+static bool heap_chunk_at(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
+    bool ok = false;
+    pthread_mutex_lock(&pieces_lk);
+    int lo = 0, hi = npieces;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (pieces[mid].at + pieces[mid].n <= addr) lo = mid + 1; else hi = mid;
+    }
+    if (lo < npieces && pieces[lo].at <= addr && addr + size <= pieces[lo].at + pieces[lo].n) {
+        *buf = pieces[lo].buf, *off = addr - pieces[lo].at;
+        ok = true;
+    }
+    pthread_mutex_unlock(&pieces_lk);
+    return ok;
+}
+// What shaders are translated for: the bytes global memory covers, its pages (log2; 0: one buffer).
+static uint64_t gmem_limit(void) { return HEAP_MAX; }
+static int gmem_chunk_shift(void) { return ptab ? PAGE_SHIFT_GM : 0; }
+#else
+uint64_t renderer_share_heap(uint64_t lo, uint64_t size) { (void)lo, (void)size; return 0; }  // (VK_EXT_external_memory_host)
+void backend_pool_created(uint64_t addr, uint64_t size) { (void)addr, (void)size; }
+void backend_pool_destroyed(uint64_t addr, uint64_t size) { (void)addr, (void)size; }
+static void pools_reset(void) {}
+static bool heap_chunk_at(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
+    (void)addr, (void)size, (void)buf, (void)off;
+    return false;
+}
+static uint64_t gmem_limit(void) { return HEAP_MAX; }
+static int gmem_chunk_shift(void) { return 0; }
+#endif
+
 static VkDescriptorBufferInfo gmem_info(void) {
+#ifdef __ANDROID__
+    if (ptab) return (VkDescriptorBufferInfo){ptab_buf, 0, (HEAP_MAX >> PAGE_SHIFT_GM) * 8};  // (the pools' page table)
+#endif
     static int off = -1;
-    if (off < 0) off = getenv("LARECOMP_VK_NO_GMEM") != NULL || !g_vk.host_import;
+    if (off < 0) off = getenv("LARECOMP_VK_NO_GMEM") != NULL || (!g_vk.host_import && !g_vk.heap_export);
     uint64_t want = (kernel_heap_size() + 0xFFFF) & ~0xFFFFull;
     if (want > HEAP_MAX) want = HEAP_MAX;
+    static int64_t cap_mb = -1;  // LARECOMP_VK_GMEM_MB=<n>: only the heap's first n MB (what Android's 1 GB share gives)
+    if (cap_mb < 0) cap_mb = getenv("LARECOMP_VK_GMEM_MB") ? atoll(getenv("LARECOMP_VK_GMEM_MB")) : 0;
+    if (cap_mb > 0 && want > (uint64_t)cap_mb << 20) want = (uint64_t)cap_mb << 20;
     if (!off && want > gmem_size && !gmem_import(want)) {
         LOG("[vk] guest heap import failed (%llu MB): shader global memory reads return zero\n", (unsigned long long)(want >> 20));
         off = 1;
@@ -2899,6 +3226,7 @@ static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSi
     static int copy = -1;
     if (copy < 0) copy = getenv("LARECOMP_VK_COPY_VERTICES") != NULL;
     if (copy || addr < HEAP_BASE) return false;
+    if (g_vk.heap_export) return heap_chunk_at(addr, size, buf, off);
     if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
     if (!gmem_buf || addr + size > HEAP_BASE + gmem_size) return false;
     *buf = gmem_buf;
@@ -2932,13 +3260,15 @@ void vk_exec_reset(void) {
     keep_drop_all();
     keep_heap = 0;
     gcopy_gen++;
-    if (gmem_buf) {
+    if (gmem_buf && !g_vk.heap_export) {  // (Android's shared heap stays: renderer_share_heap maps it again)
         vkDestroyBuffer(g_vk.dev, gmem_buf, NULL);
         vkFreeMemory(g_vk.dev, gmem_mem, NULL);
         gmem_buf = VK_NULL_HANDLE;
         gmem_mem = VK_NULL_HANDLE;
     }
-    gmem_size = gmem_tried = 0;
+    if (!g_vk.heap_export) gmem_size = 0;
+    gmem_tried = 0;
+    pools_reset();
     st_defaults();
 }
 
@@ -3098,7 +3428,8 @@ static CsProg *compute_program(NvnProgram *np) {
     CsProg *cp = calloc(1, sizeof *cp);
     if (n < 256) { tab[n].addr = ss->code_addr; tab[n].content = ss->content_hash; tab[n].cp = cp; g_cs_n = n + 1; }
     maxwell_gmem_base = HEAP_BASE;
-    maxwell_gmem_size = HEAP_MAX;
+    maxwell_gmem_size = gmem_limit();
+    maxwell_gmem_chunk_shift = gmem_chunk_shift();
     ShaderKey k = {0};
     k.glsl = 1;
     cp->si = maxwell_translate((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);

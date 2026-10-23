@@ -24,6 +24,9 @@
 #include "shader.h"
 
 uint64_t maxwell_gmem_base, maxwell_gmem_size;
+// > 0: global memory in chunks of 1 << maxwell_gmem_chunk_shift bytes, each its own GPU allocation reached through its
+// device address (Android: runtime/nvn/vulkan/exec.c renderer_share_heap); 0: one buffer.
+int maxwell_gmem_chunk_shift;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
 int maxwell_dbg_reg;
@@ -1469,31 +1472,38 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
                                                "uint(*(device ushort *)(gmem + ga))", "uint(int(*(device short *)(gmem + ga)))"};
         int nw = size == 5 ? 2 : size >= 6 ? 4 : 1;
         if (c->glsl) {  // gmem_.w[]: 32-bit words; sub-word accesses within the containing word
+            // (chunked: GW(word index), defined with the buffer in glsl_finish)
+            const char *wo = maxwell_gmem_chunk_shift ? "GW(" : "gmem_.w[", *wc = maxwell_gmem_chunk_shift ? ")" : "]";
             static const char *const gl_small[] = {
-                "(gmem_.w[uint(ga >> 2)] >> (uint(ga & 3ul) * 8u)) & 0xFFu",
-                "uint(sx8(gmem_.w[uint(ga >> 2)] >> (uint(ga & 3ul) * 8u)))",
-                "(gmem_.w[uint(ga >> 2)] >> (uint(ga & 2ul) * 8u)) & 0xFFFFu",
-                "uint(sx16(gmem_.w[uint(ga >> 2)] >> (uint(ga & 2ul) * 8u)))"};
+                "(%suint(ga >> 2)%s >> (uint(ga & 3ul) * 8u)) & 0xFFu",
+                "uint(sx8(%suint(ga >> 2)%s >> (uint(ga & 3ul) * 8u)))",
+                "(%suint(ga >> 2)%s >> (uint(ga & 2ul) * 8u)) & 0xFFFFu",
+                "uint(sx16(%suint(ga >> 2)%s >> (uint(ga & 2ul) * 8u)))"};
             if (!store) {
                 if (size < 4) {
-                    if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      if (ok) r%d = %s; else r%d = 0u;\n", d, gl_small[size], d); }
+                    if (d != RZ) {
+                        c->reg_used[d] = 1;
+                        sp(&c->body, "      if (ok) r%d = ", d);
+                        sp(&c->body, gl_small[size], wo, wc);
+                        sp(&c->body, "; else r%d = 0u;\n", d);
+                    }
                 } else {
                     for (int k = 0; k < nw; k++)
                         if (d != RZ && d + k < RZ) {
                             c->reg_used[d + k] = 1;
-                            sp(&c->body, "      if (ok) r%d = gmem_.w[uint(ga >> 2) + %du]; else r%d = 0u;\n", d + k, k, d + k);
+                            sp(&c->body, "      if (ok) r%d = %suint(ga >> 2) + %du%s; else r%d = 0u;\n", d + k, wo, k, wc, d + k);
                         }
                 }
             } else {
                 c->uses_gmem_store = true;
                 c->info->gmem_stores = true;
                 if (size < 4)
-                    sp(&c->body, "      if (ok) { uint wi = uint(ga >> 2); uint sh = uint(ga & %s) * 8u; atomicAnd(gmem_.w[wi], ~(0x%xu << sh)); "
-                       "atomicOr(gmem_.w[wi], (%s & 0x%xu) << sh); }\n", size < 2 ? "3ul" : "2ul", size < 2 ? 0xFFu : 0xFFFFu, R(d),
-                       size < 2 ? 0xFFu : 0xFFFFu);
+                    sp(&c->body, "      if (ok) { uint wi = uint(ga >> 2); uint sh = uint(ga & %s) * 8u; atomicAnd(%swi%s, ~(0x%xu << sh)); "
+                       "atomicOr(%swi%s, (%s & 0x%xu) << sh); }\n", size < 2 ? "3ul" : "2ul", wo, wc, size < 2 ? 0xFFu : 0xFFFFu, wo, wc,
+                       R(d), size < 2 ? 0xFFu : 0xFFFFu);
                 else
                     for (int k = 0; k < nw; k++)
-                        sp(&c->body, "      if (ok) gmem_.w[uint(ga >> 2) + %du] = %s;\n", k, R(d == RZ ? RZ : d + k));
+                        sp(&c->body, "      if (ok) %suint(ga >> 2) + %du%s = %s;\n", wo, k, wc, R(d == RZ ? RZ : d + k));
             }
         } else if (!store) {
             if (size < 4) {
@@ -1574,7 +1584,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         if (c->stage == STAGE_VERTEX) {
             set_reg(c, d, R(a));  // no SIMD-group functions in vertex functions: lane-local value
         } else if (c->glsl) {  // a quad xor (lane mask < 4) is the subgroup xor within the quad
-            static const char *const fn[] = {"subgroupShuffle", "subgroupShuffleUp", "subgroupShuffleDown", "subgroupShuffleXor"};
+            // (shfl_*: Maxwell's 32-lane warp inside a subgroup that may be wider - 64 on Adreno, AMD's wave64)
+            static const char *const fn[] = {"shfl_idx", "shfl_up", "shfl_down", "shfl_xor"};
             sprintf(t, "%s(%s, uint(%s))", fn[mode], R(a), bv);
             set_reg(c, d, t);
         } else if (mode == 3) {
@@ -1668,7 +1679,7 @@ static void glsl_rewrite(Ctx *c, Str *o, const char *src) {
         {"float2", "vec2"}, {"float3", "vec3"}, {"float4", "vec4"}, {"int2", "ivec2"}, {"int3", "ivec3"},
         {"int4", "ivec4"}, {"uint2", "uvec2"}, {"uint3", "uvec3"}, {"uint4", "uvec4"}, {"bool2", "bvec2"},
         {"ulong", "uint64_t"}, {"long", "int64_t"}, {"rsqrt", "inversesqrt"}, {"rint", "roundEven"},
-        {"front_facing", "gl_FrontFacing"}, {"point_coord", "gl_PointCoord"}, {"lane", "gl_SubgroupInvocationID"},
+        {"front_facing", "gl_FrontFacing"}, {"point_coord", "gl_PointCoord"}, {"lane", "(gl_SubgroupInvocationID & 31u)"},
         {"vid", "uint(gl_VertexIndex)"}, {"iid", "uint(gl_InstanceIndex)"},
     };
     const char *p = src;
@@ -1753,7 +1764,7 @@ static const char glsl_prelude[] =
     "#extension GL_KHR_shader_subgroup_basic : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle : require\n"
     "#extension GL_KHR_shader_subgroup_shuffle_relative : require\n"
-    "#extension GL_EXT_texture_shadow_lod : require\n"
+    "#extension GL_EXT_texture_shadow_lod : enable\n"  // (enable: the Android NDK's older glslang lacks it)
     "#define cbr(cb, off) cb[min((off) >> 4, uint(cb.length() - 1))][((off) >> 2) & 3u]\n"
     "uint as_u(float x) { return floatBitsToUint(x); }\n"
     "uint as_u(uint x) { return x; }\n"
@@ -1780,7 +1791,17 @@ static const char glsl_prelude[] =
     "uint bfe_s(uint v, uint ctl) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u) return 0u; if (pos >= 32u) return (int(v) < 0) ? 0xFFFFFFFFu : 0u; return uint(bitfieldExtract(int(v), int(pos), int(min(len, 32u - pos)))); }\n"
     "uint bfi(uint ins, uint ctl, uint base) { uint pos = ctl & 0xFFu, len = (ctl >> 8) & 0xFFu; if (len == 0u || pos >= 32u) return base; return bitfieldInsert(base, ins, int(pos), int(min(len, 32u - pos))); }\n"
     "float fswzadd(float a, float b, uint swz, uint lane) { uint m = (swz >> ((lane & 3u) * 2u)) & 3u; float ma = m == 1u ? -1.0f : (m == 3u ? 0.0f : 1.0f); float mb = m == 2u ? -1.0f : 1.0f; return a * ma + b * mb; }\n"
-    "uvec2 rsc(uvec2 c, vec4 s) { return (s.x == 1.0f && s.y == 1.0f) ? c : uvec2(floor((vec2(c) + 0.5f) * s.xy)); }\n";
+    "uvec2 rsc(uvec2 c, vec4 s) { return (s.x == 1.0f && s.y == 1.0f) ? c : uvec2(floor((vec2(c) + 0.5f) * s.xy)); }\n"
+    // SHFL: lanes of Maxwell's 32-wide warp, which is the subgroup on NVIDIA and a 32-lane slice of a wider one elsewhere
+    // (outside the slice: the lane's own value, as SHFL gives outside its segment)
+    "uint shfl_idx(uint v, uint i) { return subgroupShuffle(v, (gl_SubgroupInvocationID & ~31u) | (i & 31u)); }\n"
+    "float shfl_idx(float v, uint i) { return subgroupShuffle(v, (gl_SubgroupInvocationID & ~31u) | (i & 31u)); }\n"
+    "uint shfl_up(uint v, uint d) { uint l = gl_SubgroupInvocationID; uint s = subgroupShuffle(v, l - min(d, l)); return (l & 31u) >= d ? s : v; }\n"
+    "float shfl_up(float v, uint d) { uint l = gl_SubgroupInvocationID; float s = subgroupShuffle(v, l - min(d, l)); return (l & 31u) >= d ? s : v; }\n"
+    "uint shfl_down(uint v, uint d) { uint l = gl_SubgroupInvocationID; uint s = subgroupShuffle(v, min(l + d, gl_SubgroupSize - 1u)); return (l & 31u) + d < 32u ? s : v; }\n"
+    "float shfl_down(float v, uint d) { uint l = gl_SubgroupInvocationID; float s = subgroupShuffle(v, min(l + d, gl_SubgroupSize - 1u)); return (l & 31u) + d < 32u ? s : v; }\n"
+    "uint shfl_xor(uint v, uint m) { return subgroupShuffleXor(v, m & 31u); }\n"
+    "float shfl_xor(float v, uint m) { return subgroupShuffleXor(v, m & 31u); }\n";
 // The half <-> float helpers (glsl_finish: glsl_h2f_exact or glsl_h2f_native, then glsl_prelude_half).
 // Half -> float in vertex (and other pre-raster) shaders: by bits, not unpackHalf2x16. NVIDIA's driver recognises
 // unpacked halves and runs some of the fp32 math after them in native fp16, differently per shader, so a depth
@@ -1863,7 +1884,10 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->fail) { free(body.buf); free(c->body.buf); free(c); return info; }
     int set = stage == STAGE_FRAGMENT ? 1 : 0;
     Str s = {0};
-    sp(&s, "%s", glsl_prelude);
+    if (info->uses_gmem && maxwell_gmem_chunk_shift)  // (the extension right after #version, before any declaration)
+        sp(&s, "#version 460\n#extension GL_EXT_buffer_reference : require\n%s", strchr(glsl_prelude, '\n') + 1);
+    else
+        sp(&s, "%s", glsl_prelude);
     static int exact = -1;
     if (exact < 0) exact = getenv("LARECOMP_VK_EXACT_H2F") && atoi(getenv("LARECOMP_VK_EXACT_H2F")) != 0;
     sp(&s, "%s%s", !exact && (stage == STAGE_FRAGMENT || stage == STAGE_COMPUTE) ? glsl_h2f_native : glsl_h2f_exact,
@@ -1896,7 +1920,13 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "layout(std140, set = %d, binding = %d) uniform CB%d { uvec4 cb%d[%u]; };\n", set, i, i, i, n);
         if (vel_vs && i >= 3) sp(&s, "layout(std140, set = %d, binding = %d) uniform PCB%d { uvec4 pcb%d[%u]; };\n", set, 100 + i, i, i, n);
     }
-    if (info->uses_gmem)
+    if (info->uses_gmem && maxwell_gmem_chunk_shift) {  // the chunks' device addresses; GW(i): word i in its chunk
+        sp(&s, "layout(buffer_reference, std430, buffer_reference_align = 4) %sbuffer GChunk { uint w[]; };\n"
+               "layout(std430, set = %d, binding = %d) readonly buffer GMem { uint64_t base[]; } gmem_;\n",
+           c->uses_gmem_store ? "" : "readonly ", set, GMEM_BUFFER_INDEX);
+        sp(&s, "#define GW(i) GChunk(gmem_.base[(i) >> %du]).w[(i) & 0x%xu]\n", maxwell_gmem_chunk_shift - 2,
+           (1u << (maxwell_gmem_chunk_shift - 2)) - 1);
+    } else if (info->uses_gmem)
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_;\n", set, GMEM_BUFFER_INDEX,
            c->uses_gmem_store ? "" : "readonly ");
     if (c->uses_rscale && stage != STAGE_VERTEX) {

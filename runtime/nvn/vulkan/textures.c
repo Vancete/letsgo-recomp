@@ -253,10 +253,15 @@ static int font_cache_k(const NvnTexture *t) {
 }
 
 // The glyph caches' scale (runtime/hle/font_hires.c): one step per 720 lines of the window, up to 4 (1: off).
+// Android: always 1.
 int renderer_font_scale(void) {
+#ifdef __ANDROID__
+    return 1;  // (phones: the game's own glyphs - no second rasterization, no 4x larger cache textures)
+#else
     uint32_t h = g_vk.sc_extent.height;
     int k = (int)((h + 719) / 720);
     return k < 1 ? 1 : k > 4 ? 4 : k;
+#endif
 }
 
 static void create_image(NvnTexture *t, TexBackend *b) {

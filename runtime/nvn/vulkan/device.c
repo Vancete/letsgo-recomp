@@ -164,13 +164,28 @@ static void create_device(void) {
                     has_ext(ep, ne, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
     if (g_present_log) ext[n_ext++] = VK_KHR_PRESENT_ID_EXTENSION_NAME, ext[n_ext++] = VK_KHR_PRESENT_WAIT_EXTENSION_NAME;
     else if (getenv("LARECOMP_PRESENT_LOG")) LOG("[vk] LARECOMP_PRESENT_LOG: the driver has no VK_KHR_present_wait\n");
-    g_vk.custom_border = has_ext(ep, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
+    // what the device has: an extension can be listed with its feature off (Adreno), and a feature asked for that the
+    // device lacks fails vkCreateDevice (VK_ERROR_FEATURE_NOT_PRESENT)
+    VkPhysicalDeviceCustomBorderColorFeaturesEXT have_cbc = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT};
+    VkPhysicalDeviceFaultFeaturesEXT have_ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+    VkPhysicalDeviceVulkan12Features have12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have12};
+    if (has_ext(ep, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME)) have_cbc.pNext = have.pNext, have.pNext = &have_cbc;
+    if (has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) have_ff.pNext = have.pNext, have.pNext = &have_ff;
+    vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
+    // (custom border colours with the format left out: textures.c sampler_create)
+    g_vk.custom_border = have_cbc.customBorderColors && have_cbc.customBorderColorWithoutFormat;
     if (g_vk.custom_border) ext[n_ext++] = VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME;
     g_vk.divisor = has_ext(ep, ne, VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
     if (g_vk.divisor) ext[n_ext++] = VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME;
     g_vk.host_import = has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);  // guest heap as a GPU buffer (exec.c)
     if (g_vk.host_import) ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
-    bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
+#ifdef __ANDROID__  // (no host memory import there: the heap goes into GPU memory instead, exec.c renderer_share_heap;
+    // its memory pools are reached by shaders through buffer device addresses)
+    g_vk.heap_export = !g_vk.host_import && have12.bufferDeviceAddress;
+    if (g_vk.heap_export && has_ext(ep, ne, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME)) ext[n_ext++] = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
+#endif
+    bool fault = have_ff.deviceFault;  // device-lost diagnostics (vk_device_fault_report)
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     // LARECOMP_PIPE_STATS: what the driver says about each compiled shader (registers, spills, ...), exec.c pipe_exec_report
     g_pipe_exec_stats = getenv("LARECOMP_PIPE_STATS") && has_ext(ep, ne, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
@@ -180,8 +195,6 @@ static void create_device(void) {
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
-    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-    vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT div = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT,
         .vertexAttributeInstanceRateDivisor = VK_TRUE, .vertexAttributeInstanceRateZeroDivisor = VK_FALSE};
@@ -195,8 +208,10 @@ static void create_device(void) {
                                             .pNext = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL};
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                             .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
-                                            .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
-                                            .scalarBlockLayout = VK_TRUE, .pNext = &f13};
+                                            // (8-bit uniform buffers: no shader of ours uses them; Adreno has none)
+                                            .uniformAndStorageBuffer8BitAccess = have12.uniformAndStorageBuffer8BitAccess,
+                                            .storageBuffer8BitAccess = VK_TRUE,
+                                            .scalarBlockLayout = VK_TRUE, .bufferDeviceAddress = g_vk.heap_export, .pNext = &f13};
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
@@ -326,6 +341,12 @@ static void create_swapchain(void) {
     SDL_GetWindowSizeInPixels(window, &w, &h);
     VkExtent2D ext = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent : (VkExtent2D){(uint32_t)w, (uint32_t)h};
     if (!ext.width || !ext.height) return;  // minimised
+    VkSurfaceTransformFlagBitsKHR pre = caps.currentTransform;
+#ifdef __ANDROID__
+    // Android gives the window's size in landscape and the turn from the display's own (portrait) orientation: the
+    // images are drawn as they are and the compositor turns them (either way round: only the transform changes)
+    pre = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+#endif
     uint32_t nf = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(g_vk.phys, g_vk.surface, &nf, NULL);
     VkSurfaceFormatKHR fmts[64];
@@ -344,7 +365,7 @@ static void create_swapchain(void) {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = g_vk.surface, .minImageCount = count,
         .imageFormat = sf.format, .imageColorSpace = sf.colorSpace, .imageExtent = ext, .imageArrayLayers = 1,
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = pre,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = present_mode(), .clipped = VK_TRUE,
         .oldSwapchain = old};
     VK_CHECK(vkCreateSwapchainKHR(g_vk.dev, &ci, NULL, &g_vk.swapchain));
@@ -561,6 +582,11 @@ static void present_swap_image(uint32_t img, VkQueue q, uint64_t frame, int imag
         pthread_mutex_unlock(&pl_lk);
     }
     if (trace) LOG("[vk] presented: %d\n", r);
+#ifdef __ANDROID__
+    // (suboptimal on every present there: the images are not turned for the display on purpose, create_swapchain - not
+    // a reason to make the swapchain again, which waited for the GPU every frame: the game, this thread and the GPU in turn)
+    if (r == VK_SUBOPTIMAL_KHR) r = VK_SUCCESS;
+#endif
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) {
         if (other_thread) g_sc_stale = true;
         else recreate_swapchain();
@@ -934,7 +960,7 @@ void backend_present(NvnTexture *t) {
     {   // (LARECOMP_HEAL_KEYS research key F5: every texture re-checks its memory)
         extern volatile int g_heal_tex;
         extern void backend_pool_written(uint64_t addr, uint64_t size);
-        if (g_heal_tex) { g_heal_tex = 0; backend_pool_written(0x7000000000ull, 0x320000000ull); }
+        if (g_heal_tex) { g_heal_tex = 0; backend_pool_written(GUEST_LO, GUEST_HI - GUEST_LO); }
     }
     // (the images of the present before last still waiting: this one's replays write their kept images - exec.c keeps
     // two sets; the last present's can wait for their time)
@@ -1255,13 +1281,25 @@ void backend_clear_window(void) {
     if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
 }
 
+// The next window / input event, or false after a short wait with none. (Android: SDL_WaitEventTimeout polls there
+// without sleeping - one core at 100% for the whole game, the phone hot and throttled - so poll and sleep 4 ms.)
+static bool next_event(SDL_Event *e) {
+#ifdef __ANDROID__
+    if (SDL_PollEvent(e)) return true;
+    SDL_Delay(4);
+    return false;
+#else
+    return SDL_WaitEventTimeout(e, 16);
+#endif
+}
+
 int ui_run(void) {
     ui_window_init();
     atomic_store(&ui_ready, true);
     for (;;) {
         if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
         SDL_Event e;
-        while (SDL_WaitEventTimeout(&e, 16)) {
+        while (next_event(&e)) {
             if (e.type == SDL_EVENT_QUIT) {
                 LOG("window closed\n");
                 exit(0);
