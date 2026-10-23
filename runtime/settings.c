@@ -1,5 +1,6 @@
 #include "settings.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -183,7 +184,11 @@ void settings_load(void) {
     if (loaded) return;
     loaded = true;
     FILE *f = fopen(SETTINGS_FILE, "r");
-    if (!f) { settings_apply_levels(); return; }
+    if (!f) {
+        if (errno != ENOENT) LOG("[settings] cannot read %s (errno %d): the defaults\n", SETTINGS_FILE, errno);
+        settings_apply_levels();
+        return;
+    }
     char line[1200];  // (the mods list can be long)
     while (fgets(line, sizeof line, f)) {
         // (a file edited by hand may have CRLF: "resolution = dynamic\r" did not match and fell back silently)
@@ -211,9 +216,13 @@ void settings_load(void) {
     LOG("[settings] loaded %s\n", SETTINGS_FILE);
 }
 
+// Written to <file>.new, then put in the file's place: a file this process can read but not write (Android: one copied
+// in with adb belongs to the shell user, and the settings never stuck) is replaced, and a crash mid-write leaves the old one.
 void settings_save(void) {
-    FILE *f = fopen(SETTINGS_FILE, "w");
-    if (!f) { LOG("[settings] cannot write %s\n", SETTINGS_FILE); return; }
+    char tmp[1100];
+    snprintf(tmp, sizeof tmp, "%s.new", SETTINGS_FILE);
+    FILE *f = fopen(tmp, "w");
+    if (!f) { LOG("[settings] cannot write %s (errno %d)\n", tmp, errno); return; }
     fprintf(f, "# " RT_APP_NAME " settings (set on the start screen)\n");
     fprintf(f, "fullscreen = %d\n", g_settings.fullscreen);
     fprintf(f, "fps = %d\n", g_settings.fps);
@@ -258,5 +267,9 @@ void settings_save(void) {
     fprintf(f, "skip_controller = %d\n", g_settings.skip_controller);
     fprintf(f, "game_lang = %s\n", g_settings.game_lang);
     bind_settings_save(f);
-    fclose(f);
+    if (fclose(f) != 0) { LOG("[settings] cannot write %s (errno %d)\n", tmp, errno); remove(tmp); return; }
+    if (rename(tmp, SETTINGS_FILE) != 0 && (remove(SETTINGS_FILE), rename(tmp, SETTINGS_FILE) != 0)) {  // (Windows: no replacing rename)
+        LOG("[settings] cannot replace %s (errno %d)\n", SETTINGS_FILE, errno);
+        remove(tmp);
+    }
 }

@@ -235,6 +235,8 @@ DIST     := build/dist/LetsGoRecomp
 WIN_B    := build/win-release
 deps-windows:
 	tools/build_deps_windows.sh
+deps-android:
+	TMPDIR=/tmp bash tools/build_deps_android.sh
 dist:
 	@[ -f build/deps-win/lib/libavcodec.dll.a ] || { echo "make deps-windows first (LGPL FFmpeg)"; exit 1; }
 	@[ -d build/helper/lasgen ] || { echo "make gen-helper first (the game code generator)"; exit 1; }
@@ -275,4 +277,4 @@ gen-helper:
 jogo:
 	tools/publicar_jogo.sh
 
-.PHONY: all gen gen-objs runtime-objs dist deps-windows gen-helper jogo
+.PHONY: all gen gen-objs runtime-objs dist deps-windows deps-android gen-helper jogo

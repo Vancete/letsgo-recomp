@@ -1,0 +1,169 @@
+# Android
+
+Let's Go Recomp runs on Android phones and tablets (arm64-v8a, Android 10 / API 29 or later, Vulkan 1.3). The runtime
+is the same C code as on PC, cross-compiled with the Android NDK; the game code is generated from your own game files,
+as on PC. Tested on a Xiaomi 15 (Snapdragon 8 Elite, Adreno 830, Android 16) with an 8BitDo controller.
+
+Status: the game boots from the start screen to the world, with sound, text and a controller, in fullscreen landscape
+(either way round). The world runs at the game's 30 fps with room to spare (~70 fps unlimited at 720p). There are no
+touch controls yet: a controller (Bluetooth or USB) is needed.
+
+## What you need
+
+On the Windows PC that builds it (the scripts are bash: Git Bash or MSYS2, with MSYS2's `make` on the PATH):
+
+- Android NDK r29, Android SDK build-tools 36.1.0 and platform android-36, a JDK 21. The scripts look for them in
+  `%USERPROFILE%\Android` (`ndk\29`, `build-tools\36.1.0`, `platforms\android-36`, `jdk\*`, `platform-tools\adb.exe`);
+  `ANDROID_NDK` / `ANDROID_SDK` / `JAVA_HOME` point elsewhere. No Android Studio, no Gradle.
+- MSYS2 (`C:\msys64`) for `make` and the usual tools, as for the Windows build (docs/COMPILAR-WINDOWS.md).
+- Your game files extracted as for the PC build (`extracted/exefs`, `extracted/romfs.bin`).
+
+## Building
+
+```bash
+export PATH=/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH
+export ANDROID_NDK=/c/Users/<you>/Android/ndk/29 ANDROID_SDK=/c/Users/<you>/Android
+
+# 1. the libraries the runtime links against (once): FFmpeg, SDL3 (and its Java side), shaderc, VMA -> build/deps-android
+make deps-android     # (tools/build_deps_android.sh)
+
+# 2. the game code for Android (once per game / generator change): generated-android/, then build/android/liblasgame.so
+make TARGET=android gen
+make -j16 TARGET=android build/android/liblasgame.so
+
+# 3. the runtime: build/android/libmain.so
+make -j16 TARGET=android build/android/libmain.so
+
+# 4. the APK: build/android/LetsGoRecomp.apk (signed with a debug key made on first use, build/android/debug.keystore)
+bash tools/build_apk.sh
+```
+
+Notes:
+
+- The dependencies script needs `TMPDIR` as a POSIX path (FFmpeg's configure; `make deps-android` sets it). Run
+  `tools/build_apk.sh` without
+  `MSYS_NO_PATHCONV` set (its `cmd //c` calls need Git Bash's argument conversion).
+- The game code is generated for Android's guest address window (`GUEST_LO = 0x10_0000_0000`, see below): a PC
+  `lasgame.dll` / `generated/` cannot be reused. `GEN=` and `B=` choose other folders, e.g. one per game
+  (`GEN=generated-android-pika B=build/android-pika`, then copy its `liblasgame.so` to `build/android/`).
+- The libraries in the APK are stripped; `build/android/*.so` keep their debug info, for crash backtraces
+  (`llvm-addr2line -f -i -C -e build/android/libmain.so <offset>`).
+
+## Installing and the game files
+
+```bash
+adb install -r build/android/LetsGoRecomp.apk
+```
+
+On Xiaomi / HyperOS phones, "Install via USB" must be on in the developer options (and the confirmation accepted on
+the phone).
+
+The app's data root is its external files folder, `/sdcard/Android/data/dev.letsgorecomp/files`:
+
+| Path | What |
+|---|---|
+| `extracted/exefs`, `extracted/romfs.bin` | the game files (as on PC) |
+| `save/save_0/` | Eevee's save (`savedata.bin`) |
+| `save-pikachu/save_0/` | Pikachu's save |
+| `larecomp.ini` | the settings (start screen and F12 menu) |
+| `cache/` | the SPIR-V and pipeline caches |
+| `lasrecomp.log`, `lasrecomp-prev.log` | this run's log and the previous one's |
+
+Copy them with `adb push`, a file manager or a USB cable. Folders made by `adb push` belong to the shell user and the
+app can't enter them; open them up afterwards:
+
+```bash
+adb push extracted /sdcard/Android/data/dev.letsgorecomp/files/
+adb shell chmod -R a+rwX /sdcard/Android/data/dev.letsgorecomp/files/extracted
+```
+
+Files copied in with adb can be read by the app but not always written: the runtime replaces its settings file
+(written to `larecomp.ini.new`, then renamed) instead of writing over it, so settings stick either way.
+
+## Running and testing from the PC
+
+The launcher icon opens the start screen. From a PC, `LetsGoActivity` takes the runtime's command line and its
+environment as intent extras (`args`, and `env` as `NAME=value` pairs separated by `;`). Quote the extras inside the
+device's shell, or `;` splits the command:
+
+```bash
+adb shell "am start -n dev.letsgorecomp/.LetsGoActivity --es args --play --es env 'LARECOMP_FPS=0;LARECOMP_VK_PROF=1'"
+adb shell cat /sdcard/Android/data/dev.letsgorecomp/files/lasrecomp.log
+adb exec-out screencap -p > shot.png
+```
+
+- `--play` goes straight into the game (no start screen).
+- Some phones (Xiaomi) block `adb shell input`: scripted runs use `LARECOMP_INPUT` (docs/DEPURACAO.md), which also
+  ignores the real controller. The battery's world route reaches the world from a save in Pewter / Viridian.
+- The phone must be unlocked with its screen on when the app starts (a dozing phone gives no window surface).
+- `simpleperf` (from the NDK, pushed to `/data/local/tmp`) profiles the app: `simpleperf record --app dev.letsgorecomp`.
+  Per-thread CPU time: `/proc/<pid>/task/*/stat` (fields 14 and 15).
+- GPU: `LARECOMP_GPUPROF_AT=<frame>` (time per pass), `LARECOMP_PIPE_STATS=all` (the Adreno compiler's registers,
+  occupancy and instruction counts per shader), `LARECOMP_VK_PROF=1` (render-thread time and GPU waits by site).
+
+## What is different on Android
+
+### Address space
+
+Android's app processes inherit zygote's native heap where the PC keeps the guest window (`0x70_0000_0000`), so the
+window moves to `0x10_0000_0000` (`GUEST_LO`, runtime/rt.h; the game code is generated for it, `make TARGET=android`).
+Phones have a 39-bit user address space: the window (12.5 GB) fits below it. The manifest turns off native heap pointer
+tagging (`allowNativeHeapPointerTagging="false"`): host memory handed to the game must be plain addresses.
+
+### The game's memory pools in GPU memory
+
+On PC the guest heap is imported into Vulkan (`VK_EXT_external_memory_host`), so shaders that read guest memory directly
+(global memory, `LDG` / `STG` - the in-game text, for one) and in-place vertex reads see it. Adreno has no such import.
+Instead, every NVN memory pool the game makes in its heap - what the Switch's GPU can see, nothing else - becomes GPU
+memory itself (runtime/nvn/vulkan/exec.c, `backend_pool_created`): an exportable allocation (`VK_KHR_external_memory_fd`)
+gets the pool's contents and is mapped over the pool's pages from its fd, so the game reads and writes it as before;
+when the game finalizes the pool its pages go back to plain memory. Shaders reach global memory through a table of
+device addresses, one per 4 KB page of the heap (`bufferDeviceAddress`, `GL_EXT_buffer_reference`;
+`maxwell_gmem_chunk_shift` in the shader translator; pages outside pools read zero).
+
+Why not the whole heap: the driver commits an allocation's memory at once (the 3.2 GB heap would cost 2.2 GB more RAM),
+and Adreno's exportable memory is uncached for the CPU. For the pools that costs nothing measurable (the game expects
+most pools to be CPU-uncached on the Switch too): +0.5 GB of RAM over not sharing, no CPU time lost.
+
+Vertex and index data is copied to a GPU ring (`vertex_read = copy`, the default on Android): read in place from the
+pools' memory, the GPU's vertex fetch was slow and every buffer copy of the game had to wait for the GPU.
+
+### Vulkan
+
+- Features are requested only when the device has them (Adreno: no 8-bit uniform buffers; custom border colours and
+  device-fault reports checked as features, not only as extensions).
+- The swapchain is not pre-rotated: the window is landscape and the compositor turns the images
+  (`preTransform = IDENTITY`). The driver answers every present with `VK_SUBOPTIMAL_KHR` for that; it is ignored on
+  Android (rebuilding the swapchain each frame serialised the game, the render thread and the GPU: 19 fps instead of 70).
+- Going to the background (screen locked, another app) takes the window's surface away: nothing is presented
+  meanwhile, and on return the surface and swapchain are made again (device.c `lifecycle_watch` / `surface_again`).
+- Shuffles (`SHFL`) run in 32-lane slices, the Switch's warp size (Adreno's subgroups are wider, and only in fragment
+  and compute shaders).
+- `GL_EXT_texture_shadow_lod` is enabled, not required (the NDK's shaderc is older).
+
+### Settings and look
+
+- Fullscreen always, 720p rendering by default (`render_height = 720`): the phone's GPU cost goes with the pixels
+  (main scene pass ~4.4 ms + ~7.9 ms per megapixel on the Adreno 830).
+- The start screen is drawn at 2x; there are no window buttons.
+- The game's own glyphs (the PC's higher-resolution font cache, runtime/hle/font_hires.c, is off).
+- The SDL main thread polls events with a short sleep (SDL's wait polls without sleeping on Android: a core at 100%).
+
+## Performance (Xiaomi 15, world, 720p)
+
+| | before | now |
+|---|---|---|
+| world, unlimited | ~19 fps | ~70 fps |
+| GPU per frame | ~21 ms | ~10 ms (main pass 5.5, shadow map 1.5) |
+| normal play (30 fps) | | steady 30, frames up to ~40 ms |
+
+Measured and ruled out on the tiler: loading attachments at each pass, storing depth, the barrier between passes (~0
+each). Next levers: the world's materials run at 9% shader occupancy (~27 registers, ~45 texture reads) - fewer live
+registers in the translator; the game's 60 fps mode; an upscaler (FSR 1 exists in exec.c `post_process`; Snapdragon
+GSR 1 / SGSR 2, BSD 3-Clause, would fit the same place) to render below 720p.
+
+## Known gaps
+
+- No touch controls; a controller is needed.
+- FSR 3.1 is PC-only (its library): chosen on Android it falls back to FSR 1. Frame generation is untested there.
+- The APK is signed with a debug key and is debuggable.

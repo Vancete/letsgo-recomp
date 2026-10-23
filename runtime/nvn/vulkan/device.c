@@ -392,6 +392,35 @@ static void recreate_swapchain(void) {
     g_sc_stale = false;
     pthread_mutex_unlock(&sc_lk);
 }
+#ifdef __ANDROID__
+// Android takes the window's surface away when the app goes to the background (the screen locked, another app on top)
+// and gives a new one when it comes back: nothing is shown meanwhile, and then the swapchain is made on a surface of the
+// new window (vk_frame_begin). Without it the game went on (its sound too) behind a black screen. An event watch: it
+// sees the events whichever loop takes them (the start screen's, the game's).
+static _Atomic int g_background, g_surface_new;
+static bool SDLCALL lifecycle_watch(void *ud, SDL_Event *e) {
+    (void)ud;
+    if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND) g_background = 1;
+    else if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND) g_surface_new = 1, g_background = 0;
+    return true;
+}
+static void surface_again(void) {
+    pthread_mutex_lock(&sc_lk);
+    vkDeviceWaitIdle(g_vk.dev);
+    for (uint32_t i = 0; i < g_vk.sc_count; i++) vkDestroyImageView(g_vk.dev, g_vk.sc_views[i], NULL);
+    g_vk.sc_count = 0;
+    if (g_vk.swapchain) vkDestroySwapchainKHR(g_vk.dev, g_vk.swapchain, NULL);
+    g_vk.swapchain = VK_NULL_HANDLE;
+    vkDestroySurfaceKHR(g_vk.inst, g_vk.surface, NULL);
+    g_vk.surface = VK_NULL_HANDLE;
+    if (SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) create_swapchain();
+    else g_vk.surface = VK_NULL_HANDLE, g_surface_new = 1;  // (the new window may not be there yet: the next frame tries again)
+    g_sc_gen++;
+    g_sc_stale = false;
+    pthread_mutex_unlock(&sc_lk);
+    LOG("[vk] back from the background: swapchain made again (%ux%u)\n", g_vk.sc_extent.width, g_vk.sc_extent.height);
+}
+#endif
 // Acquire a window image without waiting while holding sc_lk (the present thread may need it to free one)
 static VkResult acquire_image(VkSemaphore sem, uint32_t *img) {
     for (int tries = 0;; tries++) {
@@ -440,6 +469,11 @@ bool vk_frame_begin(const float clear[4]) {
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     if (!w || !h) return false;  // minimised
+#ifdef __ANDROID__
+    if (g_background) return false;
+    if (g_surface_new) g_surface_new = 0, surface_again();
+    if (!g_vk.surface) return false;
+#endif
     if (!g_vk.swapchain || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height) recreate_swapchain();
     if (!g_vk.swapchain) return false;
     static int trace = -1;
@@ -1250,6 +1284,9 @@ void ui_window_init(void) {
     if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     create_instance();
     if (!SDL_Vulkan_CreateSurface(window, g_vk.inst, NULL, &g_vk.surface)) FATAL("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
+#ifdef __ANDROID__
+    SDL_AddEventWatch(lifecycle_watch, NULL);
+#endif
     pick_device();
     create_device();
     create_swapchain();
