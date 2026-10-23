@@ -233,11 +233,14 @@ static void add_unit(Units *us, const char *src, const char *work, const char *s
     u->bytes = stat(src, &st) == 0 ? (unsigned long long)st.st_size : 0;
 }
 
-// The flags the game code was built with (GAMELIB_CFLAGS, part of its id). zig cc reads -march=<cpu> with its own CPU
-// names (x86_64_v3) and takes "-<feature>" off the end, so x86-64-v3 would be CPU "x86": the same CPU as -mcpu there.
+// The flags the game code is built with: GAMELIB_CFLAGS (part of its id) and this CPU's level (gamelib_cpu_level, the
+// rest of the id). zig cc reads -march=<cpu> with its own CPU names (x86_64_v3) and takes "-<feature>" off the end, so
+// x86-64-v3 would be CPU "x86": the same CPU as -mcpu there.
 static void add_cflags(Args *a, const Tools *t) {
     char buf[1024];
-    snprintf(buf, sizeof buf, "%s", GAMELIB_CFLAGS);
+    const char *level = gamelib_cpu_level();
+    if (strcmp(level, "base")) snprintf(buf, sizeof buf, "%s -march=x86-64-%s", GAMELIB_CFLAGS, level);
+    else snprintf(buf, sizeof buf, "%s", GAMELIB_CFLAGS);
     for (char *f = strtok(buf, " "); f; f = strtok(NULL, " ")) {
         if (t->zig && !strncmp(f, "-march=", 7)) {
             char cpu[128];
@@ -257,7 +260,9 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     char inc[1200];
     snprintf(inc, sizeof inc, "-I%s", t->inc);
     add(&a, inc);
-    add(&a, "-DGAMELIB_ID=\"" GAMELIB_ID "\"");
+    char id[128];
+    snprintf(id, sizeof id, "-DGAMELIB_ID=\"%s\"", gamelib_id());
+    add(&a, id);
     add(&a, "-c");
     add(&a, u->src);
     add(&a, "-o");
@@ -296,8 +301,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         setenv("ZIG_LOCAL_CACHE_DIR", zc, 1);
 #endif
     }
-    LOG("[gamebuild] generator %s%s%s, compiler %s%s, %d jobs\n", t.gen, t.gen_script[0] ? " " : "", t.gen_script,
-        t.cc, t.zig ? " cc" : "", o->jobs);
+    LOG("[gamebuild] generator %s%s%s, compiler %s%s, %d jobs, CPU level %s\n", t.gen, t.gen_script[0] ? " " : "",
+        t.gen_script, t.cc, t.zig ? " cc" : "", o->jobs, gamelib_cpu_level());
 
     // 1. the generator, every module at once; their finished files are compiled while it goes on (bases: rt.h)
     enum { NGEN = 4 };
@@ -476,7 +481,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         char idp[1100];
         snprintf(idp, sizeof idp, "%s.id", lib);
         FILE *f = NULL;
-        if (rename(tmp, lib) != 0 || !(f = fopen(idp, "wb")) || fprintf(f, "%s\n", GAMELIB_ID) < 0) {
+        if (rename(tmp, lib) != 0 || !(f = fopen(idp, "wb")) || fprintf(f, "%s\n", gamelib_id()) < 0) {
             snprintf(why, why_size, "the game code couldn't be saved");
             ok = false;
         }
