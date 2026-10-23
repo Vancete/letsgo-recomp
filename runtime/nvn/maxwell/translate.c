@@ -3,7 +3,8 @@
 // The binary is an NVN header (0x30), the shader program header (SPH, 0x50; graphics stages), then
 // instructions in groups of four 64-bit words (one scheduling word + three instructions).
 // Registers are emitted as `uint` variables; float ops use as_type<> conversions. Shaders with
-// branches become a `switch (pc)` state machine with explicit SSY/PBK/PCNT stacks.
+// branches become a `switch (pc)` state machine with explicit SSY/PBK/PCNT stacks - in GLSL only those with loops or
+// branches back: forward-only ones are straight code with jump flags (straight_ok; Android by default).
 //
 // GLSL: the instruction body is generated in the MSL spelling and converted by glsl_rewrite() (a token-aware
 // pass: as_type<T>() -> as_u/as_f overloads, float4 -> vec4, ulong -> uint64_t, char()/short() casts -> sx8/sx16,
@@ -83,6 +84,8 @@ typedef struct {
     bool glsl;               // emit Vulkan GLSL: dialect-specific constructs here, the rest via glsl_rewrite()
     bool uses_gmem_store;    // STG present: the gmem buffer is not readonly
     uint32_t cbuf_need[18];  // highest constant vec4 index + 1 per cbuf (array size of the GLSL block)
+    bool straight;           // GLSL, forward branches only: straight code with jump flags, not the pc state machine
+    uint32_t sync_target;    // (straight) where the SYNC being translated goes: the innermost SSY's target
 } Ctx;
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
@@ -834,6 +837,55 @@ static void emit_tex(Ctx *c, uint64_t w, bool bindless) {
     write_tex_result(c, slot, call, mask, d, RZ, false, false);
 }
 
+// Straight GLSL for programs whose branches all go forward (the game's: if / else with SSY ... SYNC, no loops): the
+// code in program order, each stretch between branch targets in an `if (live)`; a branch or SYNC sets its target's flag
+// (jl<pc>) and turns `live` off, a target turns it on again when its flag is set. The pc state machine (a loop around a
+// switch) kept every register live across the whole shader: on Adreno the world's materials used ~27 registers and
+// ran at 9% occupancy. Not for loops (PBK / PCNT / BRK / CONT), indexed branches (BRX) or branches back; each SSY's
+// target must close what it opened in program order (a SYNC, branch or EXIT just before it) - the SYNCs' targets are
+// then known here. Android only by default (on PC the GLSL - and so the players' SPIR-V caches - stays as it was);
+// LARECOMP_VK_STRAIGHT=1 / 0 turns it on / off anywhere.
+static bool straight_ok(const uint64_t *code, size_t end) {
+    static int on = -1;
+#ifdef __ANDROID__
+    if (on < 0) on = !getenv("LARECOMP_VK_STRAIGHT") || atoi(getenv("LARECOMP_VK_STRAIGHT")) != 0;
+#else
+    if (on < 0) on = getenv("LARECOMP_VK_STRAIGHT") && atoi(getenv("LARECOMP_VK_STRAIGHT")) != 0;
+#endif
+    if (!on) return false;
+    uint32_t stack[16];
+    int n = 0;
+    uint64_t prev = 0;
+    for (size_t i = 0; i < end; i++) {
+        if (i % 4 == 0) continue;
+        uint64_t w = code[i];
+        uint32_t pc = (uint32_t)(i * 8);
+        bool closes = false;
+        while (n && stack[n - 1] == pc) n--, closes = true;
+        if (closes) {  // (only an unpredicated SYNC, branch or EXIT may come before an SSY's target)
+            uint64_t op = prev & 0xfff0000000000000ull;
+            bool guarded = ((prev >> 16) & 0xf) != 7;
+            if (guarded || (op != 0xf0f0000000000000ull && op != 0xe240000000000000ull && op != 0xe300000000000000ull) ||
+                (op == 0xf0f0000000000000ull && (prev & 0xfff8000000000000ull) != 0xf0f8000000000000ull))
+                return false;
+        }
+        uint64_t top12 = w & 0xfff0000000000000ull;
+        if (((top12 == 0xe240000000000000ull || top12 == 0xe290000000000000ull) && (w & 0x20)) || top12 == 0xe250000000000000ull || top12 == 0xe2a0000000000000ull || top12 == 0xe2b0000000000000ull ||
+            top12 == 0xe340000000000000ull || top12 == 0xe350000000000000ull)
+            return false;  // BRA / SSY in another form, BRX, PBK, PCNT, BRK, CONT
+        int64_t t = norm_target((int64_t)pc + 8 + sbits(w, 20, 24));
+        bool flow = (w & 0xfff0000000000020ull) == 0xe240000000000000ull || (w & 0xfff0000000000020ull) == 0xe290000000000000ull;
+        if (flow && t != pc && (t < pc || (size_t)(t / 8) >= end)) return false;  // back, or past the end (no flag for it)
+        if ((w & 0xfff0000000000020ull) == 0xe290000000000000ull) {  // SSY
+            if (t <= pc || n == 16) return false;
+            stack[n++] = (uint32_t)t;
+        }
+        if ((w & 0xfff8000000000000ull) == 0xf0f8000000000000ull && !n) return false;  // SYNC without SSY
+        prev = w;
+    }
+    return n == 0;
+}
+
 // ------------------------------------------------------------------ instruction translation
 static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     char t[2048], u[2048];
@@ -855,7 +907,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
 
 #define OPM(val, mask) ((w & (uint64_t)(mask)) == (uint64_t)(val))
     if (OPM(0xe300000000000000ull, 0xfff0000000000000ull)) {  // EXIT
-        sp(&c->body, c->branchy ? "    exit_now = true; break;\n" : "    break;\n");
+        sp(&c->body, c->straight ? "    live = false;\n" : c->branchy ? "    exit_now = true; break;\n" : "    break;\n");
     } else if (OPM(0xe330000000000000ull, 0xfff0000000000000ull)) {  // KIL
         c->info->uses_discard = true;
         if (getenv("LARECOMP_NO_DISCARD")) {
@@ -865,10 +917,12 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     } else if (OPM(0xe240000000000000ull, 0xfff0000000000020ull)) {  // BRA
         uint32_t target = norm_target((int64_t)pc + 8 + sbits(w, 20, 24));
         c->uses_branches = true;
-        sp(&c->body, "    pc = %uu; continue;\n", target);
+        if (c->straight && target > pc) sp(&c->body, "    jl%u = true; live = false;\n", target);
+        else if (c->straight) sp(&c->body, "    live = false;\n");  // (the branch to itself after the last EXIT)
+        else sp(&c->body, "    pc = %uu; continue;\n", target);
     } else if (OPM(0xe290000000000000ull, 0xfff0000000000020ull)) {  // SSY
         c->uses_branches = true;
-        sp(&c->body, "    ssy[ssy_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
+        if (!c->straight) sp(&c->body, "    ssy[ssy_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
     } else if (OPM(0xe2a0000000000000ull, 0xfff0000000000020ull)) {  // PBK
         c->uses_branches = true;
         sp(&c->body, "    pbk[pbk_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
@@ -876,7 +930,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         c->uses_branches = true;
         sp(&c->body, "    pcnt[pcnt_n++] = %uu;\n", norm_target((int64_t)pc + 8 + sbits(w, 20, 24)));
     } else if (OPM(0xf0f8000000000000ull, 0xfff8000000000000ull)) {  // SYNC
-        sp(&c->body, "    pc = ssy[--ssy_n]; continue;\n");
+        if (c->straight) sp(&c->body, "    jl%u = true; live = false;\n", c->sync_target);
+        else sp(&c->body, "    pc = ssy[--ssy_n]; continue;\n");
     } else if (OPM(0xe340000000000000ull, 0xfff0000000000000ull)) {  // BRK
         sp(&c->body, "    pc = pbk[--pbk_n]; continue;\n");
     } else if (OPM(0xe350000000000000ull, 0xfff0000000000000ull)) {  // CONT
@@ -1871,7 +1926,7 @@ static char *vel_rename(const char *src) {
 }
 
 // Declarations + entry point around the (rewritten) body; mirrors the MSL assembly in maxwell_translate.
-static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
+static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg, char *flags) {
     ShaderInfo *info = c->info;
     const ShaderKey *key = c->key;
     int stage = c->stage;
@@ -2001,6 +2056,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&pre, "  uint pc = 8u; uint ssy[16]; uint ssy_n = 0u; uint pbk[16]; uint pbk_n = 0u; uint pcnt[16]; uint pcnt_n = 0u;\n");
         sp(&pre, "  bool exit_now = false;\n");
     }
+    if (c->straight) sp(&pre, "  bool live = true;\n%s", flags ? flags : "");
+    free(flags);
     for (int pass = 0; pass < (vel_vs ? 2 : 1); pass++) {
         char *b = body.buf ? body.buf : "";
         if (pass) {  // the previous frame's position: the body on pcb<k>, its outputs into locals
@@ -2130,13 +2187,32 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     bool dbg = maxwell_dbg_code && blob == maxwell_dbg_code && stage == STAGE_FRAGMENT;
     static int annotate = -1;
     if (annotate < 0) annotate = getenv("LARECOMP_SAVE_MSL") != NULL;
-    c->branchy = any_branch;
+    c->straight = c->glsl && any_branch && straight_ok((const uint64_t *)code, end);
+    c->branchy = any_branch && !c->straight;
+    uint32_t sstack[16];
+    int sn = 0;
+    Str flags = {0};  // (straight) the jump flags' declarations
+    if (c->straight) sp(&c->body, "  if (live) {\n");
     for (size_t i = 0; i < end && !c->fail; i++) {
         if (i % 4 == 0) continue;
         uint32_t pc = (uint32_t)(i * 8);
-        if (any_branch && label[i]) sp(&c->body, "  case %uu:\n", pc);
-        if (annotate) sp(&c->body, "    // pc %x: %016llx\n", pc, (unsigned long long)((const uint64_t *)code)[i]);
-        emit_insn(c, ((const uint64_t *)code)[i], pc);
+        uint64_t w = ((const uint64_t *)code)[i];
+        if (c->straight) {
+            while (sn && sstack[sn - 1] == pc) sn--;
+            if (label[i] && i != 1) {
+                sp(&c->body, "  }\n  live = live || jl%u;\n  if (live) {\n", pc);
+                sp(&flags, "  bool jl%u = false;\n", pc);
+            }
+            if ((w & 0xfff0000000000020ull) == 0xe290000000000000ull) sstack[sn++] = norm_target((int64_t)pc + 8 + sbits(w, 20, 24));
+            c->sync_target = sn ? sstack[sn - 1] : 0;
+        } else if (any_branch && label[i]) sp(&c->body, "  case %uu:\n", pc);
+        if (annotate) sp(&c->body, "    // pc %x: %016llx\n", pc, (unsigned long long)w);
+        emit_insn(c, w, pc);
+        // (straight: what follows a branch, SYNC or EXIT runs only if `live` still is)
+        uint64_t top12 = w & 0xfff0000000000000ull;
+        if (c->straight && (top12 == 0xe240000000000000ull || top12 == 0xe300000000000000ull ||
+                            (w & 0xfff8000000000000ull) == 0xf0f8000000000000ull))
+            sp(&c->body, "  }\n  if (live) {\n");
         if (dbg && pc == maxwell_dbg_pc) {
             int rr = maxwell_dbg_reg % 1000, half = maxwell_dbg_reg / 1000;  // +1000: low f16, +2000: high f16
             c->reg_used[rr] = 1;
@@ -2146,8 +2222,9 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         info->num_insts++;
     }
     free(label);
-    if (c->fail) { free(c->body.buf); free(c); return info; }
-    if (c->glsl) return glsl_finish(c, any_branch, dbg);
+    if (c->straight) sp(&c->body, "  }\n");
+    if (c->fail) { free(c->body.buf); free(flags.buf); free(c); return info; }
+    if (c->glsl) return glsl_finish(c, any_branch && !c->straight, dbg, flags.buf);
 
     // ---------------------------------------------------------- MSL source
     Str s = {0};

@@ -158,8 +158,11 @@ pools' memory, the GPU's vertex fetch was slow and every buffer copy of the game
 | normal play (30 fps) | | steady 30, frames up to ~40 ms |
 
 Measured and ruled out on the tiler: loading attachments at each pass, storing depth, the barrier between passes (~0
-each). Next levers: the world's materials run at 9% shader occupancy (~27 registers, ~45 texture reads) - fewer live
-registers in the translator; the game's 60 fps mode; an upscaler (FSR 1 exists in exec.c `post_process`; Snapdragon
+each). Shaders with branches (all forward in this game) are straight GLSL instead of a `switch (pc)` state machine
+(translate.c `straight_ok`; Android only by default, `LARECOMP_VK_STRAIGHT=1` on PC): the world's materials went from ~27 to ~17 full-precision registers (Adreno occupancy 9% ->
+15%), the main pass ~10% faster with the GPU saturated (2160p A/B; at 720p the GPU is not the limit and its clock
+follows the load, so timestamps there can't show it). Next levers: half precision in the materials (their ~44 texture
+reads keep occupancy at 15%); the game's 60 fps mode; an upscaler (FSR 1 exists in exec.c `post_process`; Snapdragon
 GSR 1 / SGSR 2, BSD 3-Clause, would fit the same place) to render below 720p.
 
 ## Known gaps
