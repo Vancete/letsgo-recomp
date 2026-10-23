@@ -103,6 +103,7 @@ Tudo o que foi usado para diagnosticar o port. As variáveis de ambiente valem p
 | `LARECOMP_WRITE_WATCH=0` | o heap do jogo é reservado sem o rastreio de páginas escritas do Windows (`MEM_WRITE_WATCH`); o cache de vértices fica desligado |
 | `LARECOMP_VK_ASYNC_COPY=0` | as cópias de vértices e índices para a VRAM voltam a ser feitas pela thread de renderização (padrão: duas threads auxiliares fazem as de 32 KB ou mais; desligado com menos de 4 processadores lógicos) |
 | `LARECOMP_VCOPY_SAME=1` (com `LARECOMP_VK_PROF`) | pesquisa: quantos bytes de vértice copiados eram iguais à cópia anterior do mesmo intervalo (um hash por intervalo; custa tanto quanto a cópia) |
+| `LARECOMP_FRAME_FINISH=1` | com a thread de renderização, o `nvnQueueFinish` do laço de quadros do jogo (o que ele chama quando mediu menos de 4 ms de GPU no quadro anterior) volta a esperar a fila e a GPU; sem ela segue o caminho do próprio jogo com GPU lenta (HISTORICO, "o Finish de cada quadro") |
 | `LARECOMP_VK_COPY_WAIT=1` | as cópias de buffer do jogo (`CopyBufferToBuffer`) voltam a esperar a GPU sempre (antes da 0.5.1 era assim); sem ela, só esperam quando a GPU escreve a origem ou o destino, ou lê o destino direto da memória |
 | `LARECOMP_LOG_B2B=1` | as 60 primeiras cópias de buffer: origem, destino, tamanho e se esperaram a GPU (`[b2b]`) |
 | `LARECOMP_LOG_GPUWRITES=1` | loga cada faixa de memória que um compute pode escrever (storage buffers ligados) ao entrar no conjunto |

@@ -5,6 +5,15 @@
 Iván Serrano's ([@Vancete](https://github.com/Vancete), PRs #17 and #19): the in-house frame generation, SSAO Ultra,
 the controller layout and the menus in the game's own style.
 
+- **Up to twice the frame rate when the CPU is the limit** (no frame limit, or a slower CPU): with the render thread
+  the game finished its GPU queue every frame - it does when its measured GPU time is under 4 ms, and our counters
+  always were - so the game, the render thread and the GPU ran one after another (the render thread even made it
+  slower than without it). That call now takes the game's own path for a slower GPU. Pallet Town, 4K with no
+  effects, unlimited: 145 -> 307 fps; the menu 140 -> 300; walking 8.5 -> 5.0 ms a frame. 30 / 60 / 120 fps and frame
+  generation pace exactly as before. `LARECOMP_FRAME_FINISH=1` brings the old wait back. Also: fences recorded inside
+  command lists were never set (the condition was read as the sync; unused by Let's Go), and the game's indirect calls
+  are ~1.5 % cheaper.
+
 - **The F12 menu and the start screen look like the game's own menus** (its Options screen): a lime background with
   big pale gears, slowly sliding stripes and halftone dots; each setting a white pill with dark text, the one under the
   cursor yellow with a bobbing arrow at its left and `< >` around its value; the setting's description in a box with a
