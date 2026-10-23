@@ -4798,7 +4798,10 @@ static bool sun_dir(uint64_t fr, float out[3]) {
 static void contact_run(VkCommandBuffer cb, VkImageView dv, uint32_t w, uint32_t h, float mo, uint64_t fr) {
     float L[3];
     uint32_t bs = ao.scene_size[ao.scene_cur];
-    if (!sun_dir(fr, L) || ao.poff < 64 || ao.poff > bs) return;
+    // (none on the title screen: its close-up of Pikachu put the shadows of its own arms onto its chest as jagged
+    // triangles - the rays are made for the world's scale, feet and props on the ground: runtime/hle/fps60.c game_title)
+    extern bool game_title(void);
+    if (game_title() || !sun_dir(fr, L) || ao.poff < 64 || ao.poff > bs) return;
     // into the view space the shaders rebuild from the depth (x right, y as the image's rows, z the distance): the
     // camera's rigid view (row-major, the 64 bytes before the projection in the scene block: mv_capture_camera) is GL's,
     // looking down -z, its y the rows' (checked on the shadows alone, ssao_debug: under the player's feet and a lamp's

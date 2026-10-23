@@ -37,6 +37,8 @@
   fewer samples (high 16 -> 8, medium 12 -> 6, low 8 -> 4); Ultra's contact shadows reach farther in fewer steps
   (60 -> 100 units, 8 -> 6 steps, strength 38 -> 35 %). 4K, Pallet Town: SSAO high 2.40 -> 1.46 ms, medium 1.94 ->
   1.21, low 1.61 -> 0.97; contact shadows 0.54 -> 0.53.
+- **Title screen: no contact shadows** (SSAO Ultra): on its close-up of Pikachu they drew the shadows of its own arms
+  onto its chest as jagged dark triangles. They are made for the world's scale (feet, grass, small props).
 
 ## 0.6.0 (2026-10-22)
 
