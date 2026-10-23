@@ -12,7 +12,8 @@ enum { FG_RERENDER = 0, FG_FLOW = 1 };
 enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25 = 11, RES_Q50 = 12 };
 // (11 was 67% of the display: larecomp.ini "67%" now loads as RES_Q75)
 // FSR 3.1: temporal (AMD FidelityFX, runtime/nvn/vulkan/fsr3.c), FSR 1 when its DLL is missing
-enum { UPSCALE_BILINEAR = 0, UPSCALE_FSR1 = 2 /* AMD FSR 1 */, UPSCALE_FSR3 = 3 };
+// GSR: Snapdragon Game Super Resolution 1 in the present's draw (exec.c vk_present_draw), with any anti-aliasing but FSR 3.1
+enum { UPSCALE_BILINEAR = 0, UPSCALE_FSR1 = 2 /* AMD FSR 1 */, UPSCALE_FSR3 = 3, UPSCALE_GSR = 4 };
 // FSR 3.1's presets (AMD's ratios, each axis): the render resolution is the window's divided by it
 enum { FSR3_NATIVE_AA = 0, FSR3_QUALITY = 1, FSR3_BALANCED = 2, FSR3_PERFORMANCE = 3, FSR3_ULTRA_PERFORMANCE = 4 };
 float settings_fsr3_ratio(void);  // 1.0, 1.5, 1.7, 2.0, 3.0
@@ -34,7 +35,7 @@ typedef struct {
     int res_height;      // the launcher's render height in lines (720 / 1080 / 1440 / 2160); 0: res_mode decides
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (FSR 3.1 with its anti-aliasing,
                          // else upscaler_pick: settings_apply_levels)
-    int upscaler_pick;   // (older files' upscaler choice: read, no longer used - bilinear unless FSR 3.1)
+    int upscaler_pick;   // the Graphics tab's upscaler without FSR 3.1: UPSCALE_BILINEAR or UPSCALE_GSR
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     float volume;        // master volume, 1 = 100%
     float brightness;    // colour of the game image (F12 menu, runtime/ui/menu.mm; post pass in runtime/nvn/vulkan/exec.c):

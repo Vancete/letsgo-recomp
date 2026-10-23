@@ -4697,14 +4697,15 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
 static VkPipelineLayout present_layout;
 static VkDescriptorSetLayout present_set_layout;
 
-static VkPipeline present_pipeline(VkFormat fmt) {
-    static struct { VkFormat f; VkPipeline p; } cache[4];
-    for (int i = 0; i < 4; i++) if (cache[i].p && cache[i].f == fmt) return cache[i].p;
+// gsr: the present that upscales with Snapdragon GSR 1 (present_gsr.frag); push constants: flip, crop, colour grade
+static VkPipeline present_pipeline(VkFormat fmt, bool gsr) {
+    static struct { VkFormat f; bool gsr; VkPipeline p; } cache[8];
+    for (int i = 0; i < 8; i++) if (cache[i].p && cache[i].f == fmt && cache[i].gsr == gsr) return cache[i].p;
     if (!present_layout) {
         VkDescriptorSetLayoutBinding b = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
         VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
         VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &present_set_layout));
-        VkPushConstantRange r = {VK_SHADER_STAGE_VERTEX_BIT, 0, 32};
+        VkPushConstantRange r = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48};
         VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
                                          .pSetLayouts = &present_set_layout, .pushConstantRangeCount = 1, .pPushConstantRanges = &r};
         VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &ci, NULL, &present_layout));
@@ -4713,7 +4714,7 @@ static VkPipeline present_pipeline(VkFormat fmt) {
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
          .module = vk_builtin_shader("present.vert"), .pName = "main"},
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-         .module = vk_builtin_shader("present.frag"), .pName = "main"}};
+         .module = vk_builtin_shader(gsr ? "present_gsr.frag" : "present.frag"), .pName = "main"}};
     VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
                                                  .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
@@ -4736,7 +4737,7 @@ static VkPipeline present_pipeline(VkFormat fmt) {
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = present_layout};
     VkPipeline p;
     VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p));
-    for (int i = 0; i < 4; i++) if (!cache[i].p) { cache[i].f = fmt; cache[i].p = p; break; }
+    for (int i = 0; i < 8; i++) if (!cache[i].p) { cache[i].f = fmt; cache[i].gsr = gsr; cache[i].p = p; break; }
     return p;
 }
 
@@ -5463,6 +5464,7 @@ static TexBackend *ip_ui_keep(VkCommandBuffer cb, TexBackend *in, TexBackend *ni
 // The view the present samples: the game image, or its anti-aliased / upscaled version. ow x oh: the whole image's
 // size in the window (its crop is drawn into the viewport).
 static double post_last_ow, post_last_oh;  // the output size post_process was last asked for
+static float g_present_grade[4];  // the colour grade post_process leaves to the present's draw ([3] > 0.5: apply it)
 static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_d, double oh_d, TexBackend **res);
 static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, double oh_d) {
     return post_process_ex(cb, b, ow_d, oh_d, NULL);
@@ -5507,9 +5509,20 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
         if (mb != g_mip_bias) LOG("[post] mip bias %.2f\n", mb);
         g_mip_bias = mb;
     }
-    // Debanding and a dither of one 8-bit step, last (deband.frag): on unless LARECOMP_DEBAND=0 (comparison)
+    // Debanding and a dither of one 8-bit step, last (deband.frag): on unless LARECOMP_DEBAND=0 (comparison). Off on
+    // Android unless LARECOMP_DEBAND=1: ~12% of a phone's GPU frame at 1080p, for banding hardly seen on its screen.
     static int deband = -1;
+#ifdef __ANDROID__
+    if (deband < 0) deband = getenv("LARECOMP_DEBAND") ? atoi(getenv("LARECOMP_DEBAND")) : 0;
+#else
     if (deband < 0) deband = getenv("LARECOMP_DEBAND") ? atoi(getenv("LARECOMP_DEBAND")) : 1;
+#endif
+    // The colour grade in the present's own draw (present.frag / present_gsr.frag) when nothing comes after it here:
+    // one full-size pass (written to memory and read back) less. Every image reaching the window goes through the present.
+    bool grade_late = color && !sharpen && !fsr && !fsr3 && !deband;
+    g_present_grade[0] = grade[0], g_present_grade[1] = grade[1], g_present_grade[2] = grade[2];
+    g_present_grade[3] = grade_late ? 1.0f : 0.0f;
+    if (grade_late) color = false;
     if (!smaa && !fsr && !color && !sharpen && !fsr3 && !deband) { if (res) *res = rb_; return v; }
     extern void vk_frame_suspend(void);
     extern void vk_frame_resume(void);
@@ -5664,8 +5677,11 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
     double ow = pv[6] > 0 ? vw / pv[6] : vw, oh = pv[7] > 0 ? vh / pv[7] : vh;
     VkImageView src = ip_post_view(b, ow, oh);  // (an image of a present kept until now: processed when it was made)
     if (!src) src = post_process(cb, b, ow, oh);
-    gp_mark(cb, "ours: present to the window, menus");
-    VkPipeline p = present_pipeline(g_vk.sc_format);
+    // Snapdragon GSR 1 (the Graphics tab's upscaler) when the image reaches the window larger than it is - only the
+    // bilinear upscale's place: FSR 3.1 / FSR 1 have upscaled it already (then it is the window's size)
+    bool gsr = g_settings.upscaler == UPSCALE_GSR && (vw > b->width * 1.01f || vh > b->height * 1.01f);
+    gp_mark(cb, "ours: present to the window, menus%s%s", gsr ? ", GSR" : "", g_present_grade[3] > 0.5f ? ", grade" : "");
+    VkPipeline p = present_pipeline(g_vk.sc_format, gsr);
     VkDescriptorSet ds = vk_alloc_set(present_set_layout);
     VkDescriptorImageInfo ii = {vk_default_sampler(true), src, VK_IMAGE_LAYOUT_GENERAL};
     VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
@@ -5675,7 +5691,10 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &ds, 0, NULL);
     VkViewport vp = {vx, vy, vw, vh, 0, 1};
     vkCmdSetViewport(cb, 0, 1, &vp);
-    vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, pv);
+    float pc[12];
+    memcpy(pc, pv, 32);
+    memcpy(pc + 8, g_present_grade, 16);
+    vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pc);
     vkCmdDraw(cb, 3, 1, 0, 0);
     VkViewport full = {0, 0, (float)g_vk.sc_extent.width, (float)g_vk.sc_extent.height, 0, 1};
     vkCmdSetViewport(cb, 0, 1, &full);
@@ -5709,7 +5728,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {w, h}}, .layerCount = 1,
                           .colorAttachmentCount = 1, .pColorAttachments = &ca};
     vkCmdBeginRendering(cb, &ri);
-    VkPipeline p = present_pipeline(VK_FORMAT_R8G8B8A8_UNORM);
+    VkPipeline p = present_pipeline(VK_FORMAT_R8G8B8A8_UNORM, false);
     VkDescriptorSet ds = vk_alloc_set(present_set_layout);
     VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view(b), VK_IMAGE_LAYOUT_GENERAL};
     VkWriteDescriptorSet wr = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
@@ -5721,8 +5740,8 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     VkRect2D sc = {{0, 0}, {w, h}};
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdSetScissor(cb, 0, 1, &sc);
-    float pv[8] = {renderer_origin_lower_left() && !strstr(path, "window") ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
-    vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, pv);
+    float pv[12] = {renderer_origin_lower_left() && !strstr(path, "window") ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
+    vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pv);
     vkCmdDraw(cb, 3, 1, 0, 0);
     vkCmdEndRendering(cb);
     vk_full_barrier(cb);

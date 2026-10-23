@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Upscaler: Snapdragon GSR** (F12 Graphics, *Upscaler*, with any anti-aliasing but FSR 3.1; `upscaler = gsr` in
+  larecomp.ini): Qualcomm's Game Super Resolution 1 (BSD 3-Clause, third_party/snapdragon-gsr) brings a render
+  resolution below the window's up to it in the present's own draw - a 12-tap Lanczos-like filter with adaptive
+  sharpening at edges - instead of bilinear. ~0.3 ms a frame at 2133x1200 on an Adreno 830.
+- **The colour grade in the present** (brightness / contrast / saturation, F12 Image) when nothing comes after it: one
+  full-size pass less. **Android: no debanding** by default (~12% of a phone's GPU frame at 1080p; `LARECOMP_DEBAND=1`).
+
 - **Frame generation: a second method, optical flow** (F12 menu, advanced tab: "Frame generation method", with frame
   generation on; `fg_method = rerender | flow` in larecomp.ini, switched live). Re-rendering (the default)
   draws the frame again for each in-between image; the optical flow makes them from the last two frames as they are

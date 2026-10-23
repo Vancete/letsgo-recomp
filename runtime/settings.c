@@ -129,7 +129,7 @@ static void parse_line(const char *line) {
     // (after "aa" in the file. An older file's "fsr3": FSR 3.1 is an anti-aliasing choice now)
     else if (!strcmp(key, "upscaler")) {
         if (!strcmp(val, "fsr3")) g_settings.antialias = AA_FSR3;
-        else g_settings.upscaler_pick = !strcmp(val, "bilinear") ? UPSCALE_BILINEAR : UPSCALE_SHARP;
+        else g_settings.upscaler_pick = !strcmp(val, "gsr") ? UPSCALE_GSR : UPSCALE_BILINEAR;  // (older files' FSR 1: bilinear)
     }
     // (an older "antialias = off" was only LAS Recomp's default being saved: a new key, so SMAA starts on)
     else if (!strcmp(key, "smaa")) g_settings.antialias = atoi(val) != 0 ? AA_SMAA : AA_OFF;
@@ -173,8 +173,8 @@ void settings_clamp_color(void) {
 // page; it was 100 at 2 with 16 / 12 / 8 samples), 8 samples high, 6 medium, 4 low (the accumulation evens out the
 // noise). GI high: the parameters it had before the levels (4 rays x 8 steps at half the scene's size); medium and low
 // keep the look (strength, reach, accumulation over frames) with less work: 3 rays x 6 steps at half the size, 2 x 6 at a
-// third (about 1/2 and 1/6 of high's). The upscaler: FSR 3.1 when it is the anti-aliasing, else bilinear (FSR 1 stays
-// only as FSR 3.1's fallback without its DLL: exec.c post_process).
+// third (about 1/2 and 1/6 of high's). The upscaler: FSR 3.1 when it is the anti-aliasing, else the pick - bilinear or
+// Snapdragon GSR 1 (FSR 1 stays only as FSR 3.1's fallback without its DLL: exec.c post_process).
 // fx_custom (F12 Advanced): the parameters are the player's, kept as they are (into their ranges); the levels turn the
 // SSAO and the GI on and off, and the contact shadows keep their own switch. The sliders start from the level's
 // values: moving one is what turns fx_custom on (runtime/ui/settings_ui.mm), and its reset hands them back.
@@ -215,8 +215,8 @@ void settings_apply_levels(void) {
         g_settings.gi_intensity = 2.0f, g_settings.gi_radius = 300.0f, g_settings.gi_thickness = 25.0f, g_settings.gi_temporal = true;
     }
     if (g_settings.antialias < AA_OFF || g_settings.antialias > AA_FSR3) g_settings.antialias = AA_SMAA;
-    g_settings.upscaler_pick = UPSCALE_BILINEAR;
-    g_settings.upscaler = g_settings.antialias == AA_FSR3 ? UPSCALE_FSR3 : UPSCALE_BILINEAR;
+    if (g_settings.upscaler_pick != UPSCALE_GSR) g_settings.upscaler_pick = UPSCALE_BILINEAR;
+    g_settings.upscaler = g_settings.antialias == AA_FSR3 ? UPSCALE_FSR3 : g_settings.upscaler_pick;
     if (g_settings.frame_gen != FG_AUTO && (g_settings.frame_gen < 2 || g_settings.frame_gen > 4)) g_settings.frame_gen = 0;
     if (g_settings.fg_method != FG_FLOW) g_settings.fg_method = FG_RERENDER;
 }
@@ -278,7 +278,7 @@ void settings_save(void) {
     fprintf(f, "smaa = %d\n", g_settings.antialias != AA_OFF);
     fprintf(f, "aa = %s\n", g_settings.antialias == AA_FSR3 ? "fsr3" : g_settings.antialias == AA_TAA ? "taa" :
                             g_settings.antialias == AA_SMAA ? "smaa" : "off");
-    fprintf(f, "upscaler = bilinear\n");  // (FSR 3.1: "aa"; for older versions)
+    fprintf(f, "upscaler = %s\n", g_settings.upscaler_pick == UPSCALE_GSR ? "gsr" : "bilinear");  // (FSR 3.1: "aa")
     fprintf(f, "taa_sharpness = %.2f\n", g_settings.taa_sharpness);
     fprintf(f, "fsr3_sharpness = %.2f\n", g_settings.fsr3_sharpness);
     static const char *const presets[] = {"native", "quality", "balanced", "performance", "ultra"};

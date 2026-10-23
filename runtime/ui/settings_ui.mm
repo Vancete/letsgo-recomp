@@ -488,7 +488,7 @@ void ui_tabs_begin(int *current, int count) {
 
 // ------------------------------------------------------------------ the graphics page
 static const char *const *graphics_labels(int *n) {
-    static const char *l[8];
+    static const char *l[9];
     l[0] = UI_T("Frame rate limit", "Limite de quadros", "Лимит кадров");
     l[1] = UI_T("Ambient occlusion (SSAO)", "Oclusão de ambiente (SSAO)", "Затенение (SSAO)");
     l[2] = UI_T("Indirect light (GI)", "Luz indireta (GI)", "Непрямой свет (GI)");
@@ -497,7 +497,8 @@ static const char *const *graphics_labels(int *n) {
     l[5] = UI_T("FSR 3.1 mode", "Modo do FSR 3.1", "Режим FSR 3.1");
     l[6] = UI_T("Frame generation", "Geração de quadros", "Генерация кадров");
     l[7] = UI_T("Sharpening (AMD RCAS)", "Nitidez (AMD RCAS)", "Резкость (AMD RCAS)");
-    *n = 8;
+    l[8] = UI_T("Upscaler", "Ampliação", "Масштабирование");
+    *n = 9;
     return l;
 }
 
@@ -569,6 +570,20 @@ void ui_page_graphics(float x, bool known) {
         ui_tip(UI_T("Smooths jagged edges. SMAA: light, on the final image. TAA and FSR 3.1: steadier, over several frames; FSR 3.1 also draws the scene at a lower resolution and upscales it.",
                     "Suaviza os serrilhados. SMAA: leve, na imagem final. TAA e FSR 3.1: mais estáveis, ao longo de vários quadros; o FSR 3.1 também desenha a cena numa resolução menor e a amplia.",
                     "Сглаживает зубчатые края. SMAA: лёгкое, на итоговом кадре. TAA и FSR 3.1: стабильнее, по нескольким кадрам; FSR 3.1 ещё и рисует сцену в меньшем разрешении и увеличивает её."));
+    }
+    // How a render resolution below the window's reaches it without FSR 3.1: bilinear, or Snapdragon GSR 1 in the
+    // present's draw (exec.c vk_present_draw, settings_apply_levels)
+    if (g_settings.antialias != AA_FSR3) {
+        const char *up[] = {UI_T("Bilinear", "Bilinear", "Билинейное"), "Snapdragon GSR"};
+        int u = g_settings.upscaler_pick == UPSCALE_GSR;
+        ui_row(l[8], x);
+        if (ui_combo("##upscaler", &u, up, 2)) g_settings.upscaler_pick = u ? UPSCALE_GSR : UPSCALE_BILINEAR, settings_apply_levels();
+        ui_tip(UI_T("When the scene is drawn below the screen's resolution: Snapdragon GSR (Qualcomm's Game Super Resolution) "
+                    "keeps edges and detail sharper than bilinear, for a small cost on the GPU.",
+                    "Quando a cena é desenhada abaixo da resolução da tela: o Snapdragon GSR (Game Super Resolution da Qualcomm) "
+                    "mantém bordas e detalhes mais nítidos que o bilinear, com um custo pequeno na GPU.",
+                    "Когда сцена рисуется ниже разрешения экрана: Snapdragon GSR (Game Super Resolution от Qualcomm) "
+                    "сохраняет края и детали чётче билинейного, с небольшой нагрузкой на GPU."));
     }
     // FSR 3.1's presets: the render resolution is the window's divided by the ratio (runtime/nvn/output_scale.c)
     if (g_settings.antialias == AA_FSR3) {

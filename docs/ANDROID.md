@@ -161,9 +161,15 @@ Measured and ruled out on the tiler: loading attachments at each pass, storing d
 each). Shaders with branches (all forward in this game) are straight GLSL instead of a `switch (pc)` state machine
 (translate.c `straight_ok`; Android only by default, `LARECOMP_VK_STRAIGHT=1` on PC): the world's materials went from ~27 to ~17 full-precision registers (Adreno occupancy 9% ->
 15%), the main pass ~10% faster with the GPU saturated (2160p A/B; at 720p the GPU is not the limit and its clock
-follows the load, so timestamps there can't show it). Next levers: half precision in the materials (their ~44 texture
-reads keep occupancy at 15%); the game's 60 fps mode; an upscaler (FSR 1 exists in exec.c `post_process`; Snapdragon
-GSR 1 / SGSR 2, BSD 3-Clause, would fit the same place) to render below 720p.
+follows the load, so timestamps there can't show it).
+
+Our own post-processing was ~23% of a 1080p frame: debanding is off on Android (~12% of the frame; `LARECOMP_DEBAND=1`
+turns it on), and the colour grade is applied in the present's own draw when it is the last step (one full-size pass
+less). With SMAA the post is now ~0.38 of a main pass (was 0.85); without it, nothing. The Graphics tab's *Upscaler*
+(without FSR 3.1) can be Snapdragon GSR 1 (Qualcomm's Game Super Resolution, third_party/snapdragon-gsr, BSD 3-Clause):
+one pass in the present's draw, ~0.3 ms a frame at the phone's 2133x1200 - 720p with GSR instead of rendering at 1080p
+halves the main pass. Next levers: half precision in the materials (their ~44 texture reads keep occupancy at 15%);
+the game's 60 fps mode; clear-only passes as the next pass's load (~5%).
 
 ## Known gaps
 

@@ -261,10 +261,20 @@ static const char *surf =
     "  n = normalize(cross(dx, dy));\n"
     "  if (dot(n, c) > 0.0) n = -n;\n"
     "}\n";
+// The colour grade (color.frag's: brightness, contrast, saturation) in the present itself when it is the last of the
+// post passes (exec.c post_process): grade.w > 0.5 applies it - one full-size pass less.
+#define PRESENT_GRADE                                                                       \
+    "vec3 grade(vec3 c) {\n"                                                                \
+    "  if (pc.grade.w < 0.5) return c;\n"                                                   \
+    "  c = (c * pc.grade.x - 0.5) * pc.grade.y + 0.5;\n"                                    \
+    "  c = mix(vec3(dot(c, vec3(0.2126, 0.7152, 0.0722))), c, pc.grade.z);\n"               \
+    "  return clamp(c, 0.0, 1.0);\n"                                                        \
+    "}\n"
 static const char *builtin_src(const char *name, int *stage) {
     if (!strcmp(name, "present.vert")) {
         *stage = STAGE_VERTEX;
-        // pv[0].x: flip (lower-left origin), pv[1]: uv crop (origin, size). Fullscreen triangle; Vulkan NDC y points down.
+        // pv[0].x: flip (lower-left origin), pv[1]: uv crop (origin, size); pv[2] (the colour grade) is the fragment
+        // shader's. Fullscreen triangle; Vulkan NDC y points down.
         return "#version 450\n"
                "layout(push_constant) uniform P { vec4 a; vec4 crop; } pc;\n"
                "layout(location = 0) out vec2 uv;\n"
@@ -279,18 +289,100 @@ static const char *builtin_src(const char *name, int *stage) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"
                "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 crop; vec4 grade; } pc;\n"
                "layout(location = 0) in vec2 uv;\n"
                "layout(location = 0) out vec4 o;\n"
+               PRESENT_GRADE
                // A render resolution above the window's (the launcher's 1440p / 4K on a smaller screen: supersampling)
                // is reduced with four bilinear taps spread over each window pixel's footprint - one bilinear tap
                // skips texels and keeps the jaggies (exactly 2x: the 2x2 box).
                "void main() {\n"
                "  vec2 d = vec2(dFdx(uv.x), dFdy(uv.y)), r = abs(d) * vec2(textureSize(t, 0));\n"
-               "  if (max(r.x, r.y) < 1.05) { o = vec4(texture(t, uv).rgb, 1.0); return; }\n"
+               "  if (max(r.x, r.y) < 1.05) { o = vec4(grade(texture(t, uv).rgb), 1.0); return; }\n"
                "  vec2 q = d * 0.25;\n"
                "  vec3 c = texture(t, uv + vec2(-q.x, -q.y)).rgb + texture(t, uv + vec2(q.x, -q.y)).rgb +\n"
                "           texture(t, uv + vec2(-q.x, q.y)).rgb + texture(t, uv + vec2(q.x, q.y)).rgb;\n"
-               "  o = vec4(c * 0.25, 1.0);\n"
+               "  o = vec4(grade(c * 0.25), 1.0);\n"
+               "}\n";
+    }
+    // The present with Snapdragon Game Super Resolution 1 (the Graphics tab's upscaler; exec.c vk_present_draw: only to
+    // a larger size): Qualcomm's sgsr1_shader_mobile.frag (third_party/snapdragon-gsr, BSD 3-Clause, kept as it is but
+    // for the interface: our present's uv and push constants instead of its uniforms, its ViewportInfo from the
+    // texture's size, RGBA mode - green as the luma), then the colour grade. One pass at the window's size: a 12-tap
+    // Lanczos-like filter with adaptive sharpening where it finds an edge, one bilinear tap elsewhere.
+    if (!strcmp(name, "present_gsr.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "//  Copyright (c) 2025, Qualcomm Innovation Center, Inc. All rights reserved.\n"
+               "//  SPDX-License-Identifier: BSD-3-Clause (third_party/snapdragon-gsr/LICENSE.txt)\n"
+               "precision mediump float;\n"
+               "precision highp int;\n"
+               "layout(set = 0, binding = 0) uniform mediump sampler2D ps0;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 crop; vec4 grade; } pc;\n"
+               "layout(location = 0) in highp vec2 uv;\n"
+               "layout(location = 0) out vec4 o;\n"
+               PRESENT_GRADE
+               "#define EdgeThreshold 8.0/255.0\n"
+               "#define EdgeSharpness 2.0\n"
+               "float fastLanczos2(float x) {\n"
+               "  float wA = x - 4.0;\n"
+               "  float wB = x * wA - wA;\n"
+               "  wA *= wA;\n"
+               "  return wB * wA;\n"
+               "}\n"
+               "vec2 weightY(float dx, float dy, float c, float std) {\n"
+               "  float x = ((dx * dx) + (dy * dy)) * 0.55 + clamp(abs(c) * std, 0.0, 1.0);\n"
+               "  float w = fastLanczos2(x);\n"
+               "  return vec2(w, w * c);\n"
+               "}\n"
+               "void main() {\n"
+               "  const int mode = 1;\n"
+               "  highp vec4 ViewportInfo = vec4(1.0 / vec2(textureSize(ps0, 0)), vec2(textureSize(ps0, 0)));\n"
+               "  vec4 color;\n"
+               "  color.xyz = textureLod(ps0, uv, 0.0).xyz;\n"
+               "  highp vec2 imgCoord = ((uv * ViewportInfo.zw) + vec2(-0.5, 0.5));\n"
+               "  highp vec2 imgCoordPixel = floor(imgCoord);\n"
+               "  highp vec2 coord = (imgCoordPixel * ViewportInfo.xy);\n"
+               "  vec2 pl = (imgCoord + (-imgCoordPixel));\n"
+               "  vec4 left = textureGather(ps0, coord, mode);\n"
+               "  float edgeVote = abs(left.z - left.y) + abs(color[mode] - left.y) + abs(color[mode] - left.z);\n"
+               "  if (edgeVote > EdgeThreshold) {\n"
+               "    coord.x += ViewportInfo.x;\n"
+               "    vec4 right = textureGather(ps0, coord + vec2(ViewportInfo.x, 0.0), mode);\n"
+               "    vec4 upDown;\n"
+               "    upDown.xy = textureGather(ps0, coord + vec2(0.0, -ViewportInfo.y), mode).wz;\n"
+               "    upDown.zw = textureGather(ps0, coord + vec2(0.0, ViewportInfo.y), mode).yx;\n"
+               "    float mean = (left.y + left.z + right.x + right.w) * 0.25;\n"
+               "    left = left - vec4(mean);\n"
+               "    right = right - vec4(mean);\n"
+               "    upDown = upDown - vec4(mean);\n"
+               "    color.w = color[mode] - mean;\n"
+               "    float sum = (((((abs(left.x) + abs(left.y)) + abs(left.z)) + abs(left.w)) + (((abs(right.x) + abs(right.y)) +\n"
+               "                abs(right.z)) + abs(right.w))) + (((abs(upDown.x) + abs(upDown.y)) + abs(upDown.z)) + abs(upDown.w)));\n"
+               "    float std = 2.181818 / sum;\n"
+               "    vec2 aWY = weightY(pl.x, pl.y + 1.0, upDown.x, std);\n"
+               "    aWY += weightY(pl.x - 1.0, pl.y + 1.0, upDown.y, std);\n"
+               "    aWY += weightY(pl.x - 1.0, pl.y - 2.0, upDown.z, std);\n"
+               "    aWY += weightY(pl.x, pl.y - 2.0, upDown.w, std);\n"
+               "    aWY += weightY(pl.x + 1.0, pl.y - 1.0, left.x, std);\n"
+               "    aWY += weightY(pl.x, pl.y - 1.0, left.y, std);\n"
+               "    aWY += weightY(pl.x, pl.y, left.z, std);\n"
+               "    aWY += weightY(pl.x + 1.0, pl.y, left.w, std);\n"
+               "    aWY += weightY(pl.x - 1.0, pl.y - 1.0, right.x, std);\n"
+               "    aWY += weightY(pl.x - 2.0, pl.y - 1.0, right.y, std);\n"
+               "    aWY += weightY(pl.x - 2.0, pl.y, right.z, std);\n"
+               "    aWY += weightY(pl.x - 1.0, pl.y, right.w, std);\n"
+               "    float finalY = aWY.y / aWY.x;\n"
+               "    float maxY = max(max(left.y, left.z), max(right.x, right.w));\n"
+               "    float minY = min(min(left.y, left.z), min(right.x, right.w));\n"
+               "    finalY = clamp(EdgeSharpness * finalY, minY, maxY);\n"
+               "    float deltaY = finalY - color.w;\n"
+               "    deltaY = clamp(deltaY, -23.0 / 255.0, 23.0 / 255.0);\n"  // (smooth high contrast input)
+               "    color.x = clamp((color.x + deltaY), 0.0, 1.0);\n"
+               "    color.y = clamp((color.y + deltaY), 0.0, 1.0);\n"
+               "    color.z = clamp((color.z + deltaY), 0.0, 1.0);\n"
+               "  }\n"
+               "  o = vec4(grade(color.xyz), 1.0);\n"
                "}\n";
     }
     // ---- post passes before the present (Video tab "Anti-aliasing" / "Upscaler"): exec.c vk_present_draw.
