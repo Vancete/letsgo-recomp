@@ -486,5 +486,6 @@ código em `runtime/hle/wildbattle.c`; opção "Batalhas selvagens (experimental
   sem custo medido (190,1 x 189,5 fps). Bateria dos dois jogos com e sem o cache, 3 repetições: `bateria_scan cmp` OK
   nas 6 rotas, 0 crash; `capture_loop` na Floresta: o mundo volta igual depois dos encontros.
 - **Limites.** Só Windows (o Linux não tem o rastreio: fica desligado). Importação do heap no Vulkan com a região
-  rastreada testada só na NVIDIA; numa AMD ou Intel que recuse, o log mostra "guest heap import failed" e
-  `LARECOMP_WRITE_WATCH=0` volta ao antigo.
+  rastreada testada só na NVIDIA: na 0.6.0 o rastreio (e com ele o cache) só liga sozinho quando o adaptador de vídeo
+  principal é NVIDIA (`EnumDisplayDevices`, antes de o Vulkan existir); nas outras placas `LARECOMP_WRITE_WATCH=1` liga,
+  e o log diz se ficou ligado. Numa placa que recuse a importação, o log mostra "guest heap import failed".

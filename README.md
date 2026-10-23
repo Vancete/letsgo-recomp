@@ -25,11 +25,11 @@ area at 2x. Not Switch captures.* ▶ [Showcase video](https://youtu.be/mGk-wBu1
 
 - Native code, up to **4K** internal resolution, any window size, fullscreen
 - Anti-aliasing **SMAA**, **TAA** or **AMD FSR 3.1** (also upscales); **FSR 1** for a lower resolution
-- **Ambient occlusion (SSAO)** and **indirect light (GI)**, smooth shadows, 16x anisotropic filtering
+- **Ambient occlusion (SSAO**, with contact shadows at Ultra**)** and **indirect light (GI)**, smooth shadows, 16x anisotropic filtering
 - The game's **30 fps**, or **60 / 120 fps** in the overworld (experimental), plus **frame generation** (2x / 3x / 4x, any GPU)
 - **2x interface** images and sharper text
 - **Mods**: fan translations and other LayeredFS mods, several at once
-- Keyboard and mouse (aim Poké Balls, touch screen) and any controller; every key rebindable
+- Keyboard and mouse (aim Poké Balls, touch screen) and any controller, with the Nintendo or Xbox button layout; every key rebindable
 - Experimental **wild battles** (a classic battle, then the capture) and **skip controller selection**
 - Shaders cached on disk
 
@@ -45,7 +45,7 @@ area at 2x. Not Switch captures.* ▶ [Showcase video](https://youtu.be/mGk-wBu1
 
 In the game, **F12** opens the same settings, applied at once:
 
-![The F12 settings in the game](https://github.com/raulzrrs/letsgo-recomp/releases/download/v0.5.0/screenshot-f12-menu.jpg)
+![The F12 settings in the game](docs/images/f12-menu.jpg)
 
 ## Requirements
 

@@ -48,9 +48,19 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
 // (the OS keeps a written bit per page; GetWriteWatch reads and clears them), so the rest pays nothing for it.
 static uint64_t g_watch_lo;
 
+// On by default only where the primary display adapter is an NVIDIA card: the heap is also imported into Vulkan
+// (VK_EXT_external_memory_host, exec.c gmem_import), and a write-watched region was only tested there. Elsewhere off until it
+// is; LARECOMP_WRITE_WATCH=1 / 0 forces it on / off.
+static bool primary_adapter_is_nvidia(void) {
+    DISPLAY_DEVICEW dd = {.cb = sizeof dd};
+    for (DWORD i = 0; EnumDisplayDevicesW(NULL, i, &dd, 0); i++, dd.cb = sizeof dd)
+        if (dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) return wcsstr(dd.DeviceString, L"NVIDIA") != NULL;
+    return false;
+}
+
 bool plat_watch_writes(uint64_t watch_lo) {
     const char *e = getenv("LARECOMP_WRITE_WATCH");
-    if (e && atoi(e) == 0) return false;
+    if (e ? atoi(e) == 0 : !primary_adapter_is_nvidia()) return false;
     g_watch_lo = watch_lo;
     return true;
 }

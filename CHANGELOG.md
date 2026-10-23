@@ -2,9 +2,6 @@
 
 ## Unreleased
 
-Iván Serrano's ([@Vancete](https://github.com/Vancete), PRs #17 and #19): the in-house frame generation, SSAO Ultra,
-the controller layout and the menus in the game's own style.
-
 - **Frame generation: a second method, optical flow** (F12 menu, advanced tab: "Frame generation method", with frame
   generation on; `fg_method = rerender | flow` in larecomp.ini, switched live). Re-rendering (the default)
   draws the frame again for each in-between image; the optical flow makes them from the last two frames as they are
@@ -25,6 +22,19 @@ the controller layout and the menus in the game's own style.
 - **Frame generation "Auto" keeps its level when the display's refresh reads wrong for a moment** (the compositor's
   timing read 206 - 222 Hz at 240 now and then with images presented in bursts): another refresh only after it holds
   for 60 presents; each reading had started the levels again from 4x.
+
+## 0.6.0 (2026-10-22)
+
+Iván Serrano's ([@Vancete](https://github.com/Vancete), PRs #17 and #19): the in-house frame generation, SSAO Ultra,
+the controller layout and the menus in the game's own style.
+
+- **Faster where the scene is busy** (issue #20: Viridian City). The render thread no longer waits for the GPU before the
+  game's small buffer copies, copies vertex data on two helper threads, and keeps vertex data in VRAM from one frame to
+  the next while the game doesn't write it (the OS tracks the heap's written pages). Unlimited frame rate, i5-14600KF +
+  RTX 3080, 1080p, the same build with and without: Viridian City standing 163 -> 208 fps, walking 141 -> 195 (Eevee),
+  116 -> 167 (Pikachu); Viridian Forest 128 -> 165. Locked at 60 fps it held 60 before as well on this machine; the gain
+  is the headroom a slower CPU needs. The kept vertex data is on when the primary display adapter is an NVIDIA card (the
+  only one it was tested on); `LARECOMP_WRITE_WATCH=1` turns it on elsewhere, and the log says which.
 - **The F12 menu and the start screen look like the game's own menus** (its Options screen): a lime background with
   big pale gears, slowly sliding stripes and halftone dots; each setting a white pill with dark text, the one under the
   cursor yellow with a bobbing arrow at its left and `< >` around its value; the setting's description in a box with a
