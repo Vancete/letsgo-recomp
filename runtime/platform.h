@@ -24,7 +24,8 @@ void plat_commit(uint64_t addr, uint64_t size);
 // In-place reboot: every page of [lo, hi) back to zero (and unbacked), the window still claimed.
 bool plat_reset_guest(uint64_t lo, uint64_t hi);
 // Track the pages written in [watch_lo, the window's end) from plat_reserve_guest on (call before it): any writer, the game's
-// code, ours or the OS's. False where the platform can't, and with LARECOMP_WRITE_WATCH=0.
+// code, ours or the OS's. False where the platform can't, with LARECOMP_WRITE_WATCH=0, and (Windows) by default on a primary
+// display adapter that isn't NVIDIA's (LARECOMP_WRITE_WATCH=1 forces it).
 bool plat_watch_writes(uint64_t watch_lo);
 // The pages of [addr, addr+size) written since the last call that covered them (which forgets them): their addresses in out,
 // at most max; returns how many (max: maybe more), or -1 when writes aren't tracked there.

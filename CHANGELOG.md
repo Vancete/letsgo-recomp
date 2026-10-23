@@ -2,9 +2,6 @@
 
 ## Unreleased
 
-Iván Serrano's ([@Vancete](https://github.com/Vancete), PRs #17 and #19): the in-house frame generation, SSAO Ultra,
-the controller layout and the menus in the game's own style.
-
 - **Up to twice the frame rate when the CPU is the limit** (no frame limit, or a slower CPU): with the render thread
   the game finished its GPU queue every frame - it does when its measured GPU time is under 4 ms, and our counters
   always were - so the game, the render thread and the GPU ran one after another (the render thread even made it
@@ -14,6 +11,18 @@ the controller layout and the menus in the game's own style.
   command lists were never set (the condition was read as the sync; unused by Let's Go), and the game's indirect calls
   are ~1.5 % cheaper.
 
+## 0.6.0 (2026-10-22)
+
+Iván Serrano's ([@Vancete](https://github.com/Vancete), PRs #17 and #19): the in-house frame generation, SSAO Ultra,
+the controller layout and the menus in the game's own style.
+
+- **Faster where the scene is busy** (issue #20: Viridian City). The render thread no longer waits for the GPU before the
+  game's small buffer copies, copies vertex data on two helper threads, and keeps vertex data in VRAM from one frame to
+  the next while the game doesn't write it (the OS tracks the heap's written pages). Unlimited frame rate, i5-14600KF +
+  RTX 3080, 1080p, the same build with and without: Viridian City standing 163 -> 208 fps, walking 141 -> 195 (Eevee),
+  116 -> 167 (Pikachu); Viridian Forest 128 -> 165. Locked at 60 fps it held 60 before as well on this machine; the gain
+  is the headroom a slower CPU needs. The kept vertex data is on when the primary display adapter is an NVIDIA card (the
+  only one it was tested on); `LARECOMP_WRITE_WATCH=1` turns it on elsewhere, and the log says which.
 - **The F12 menu and the start screen look like the game's own menus** (its Options screen): a lime background with
   big pale gears, slowly sliding stripes and halftone dots; each setting a white pill with dark text, the one under the
   cursor yellow with a bobbing arrow at its left and `< >` around its value; the setting's description in a box with a

@@ -734,7 +734,8 @@ static bool keep_on(void) {
         keep_state = (!e || atoi(e) != 0) && ring_gpu_enabled() && plat_written(HEAP_BASE, 4096, &probe, 1) >= 0;
         if (keep_state) page_epoch = calloc((GUEST_HI - HEAP_BASE) >> 12, sizeof *page_epoch);
         if (!page_epoch) keep_state = 0;
-        LOG("[vk] vertex data kept in VRAM from frame to frame: %s\n", keep_state ? "on (the heap's written pages are tracked)" : "off");
+        LOG("[vk] vertex data kept in VRAM from frame to frame: %s\n",
+            keep_state ? "on (the heap's written pages are tracked)" : "off (pages not tracked: by default only on NVIDIA, LARECOMP_WRITE_WATCH=1)");
     }
     return keep_state;
 }
