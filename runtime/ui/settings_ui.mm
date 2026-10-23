@@ -41,7 +41,8 @@ UiFonts ui_load_fonts(void) {
     UiFonts f = {};
     // (Segoe UI Semibold first: dark text on light pills, as the game's)
     const char *paths[] = {"C:/Windows/Fonts/seguisb.ttf", "C:/Windows/Fonts/segoeui.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                           "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"};
+                           "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+                           "/system/fonts/Roboto-Regular.ttf"};  // (Android; without it ImGui's small built-in font)
     for (const char *p : paths) {
         if (FILE *fp = fopen(p, "rb")) fclose(fp);  // (a missing file is an assertion in ImGui, not a NULL return)
         else continue;
@@ -650,17 +651,23 @@ void ui_page_image_sound(void) {
 }
 
 // ------------------------------------------------------------------ advanced
-// The motion vectors' detail and the debug views (shown at the present instead of the game image: exec.c post_process)
+// The motion vectors' detail, the performance overlay (ui/menu.mm menu_render) and the debug views (shown at the
+// present instead of the game image: exec.c post_process)
 void ui_page_advanced(void) {
     const char *l[] = {UI_T("Per-object motion vectors", "Vetores de movimento por objeto", "Векторы движения объектов"),
                        UI_T("Occlusion alone", "Só a oclusão", "Только затенение"),
                        UI_T("Indirect light alone", "Só a luz indireta", "Только непрямой свет"),
-                       UI_T("Motion vectors", "Vetores de movimento", "Векторы движения")};
-    float x = ui_label_x(l, 4);
+                       UI_T("Motion vectors", "Vetores de movimento", "Векторы движения"),
+                       UI_T("Performance overlay", "Indicador de desempenho", "Индикатор производительности")};
+    float x = ui_label_x(l, 5);
     ui_toggle("##mv_objects", l[0], x, &g_settings.mv_objects);
     ui_tip(UI_T("The motion of each object, not only the camera's, for TAA, FSR 3.1 and the frame generation.",
                 "O movimento de cada objeto, não só o da câmera, para o TAA, o FSR 3.1 e a geração de quadros.",
                 "Движение каждого объекта, а не только камеры, для TAA, FSR 3.1 и генерации кадров."));
+    ui_toggle("##show_fps", l[4], x, &g_settings.show_fps);
+    ui_tip(UI_T("In the top right corner: frames per second, how busy the GPU is, and the CPU use of the game (all cores).",
+                "No canto superior direito: quadros por segundo, quanto a GPU está ocupada e o uso de CPU do jogo (todos os núcleos).",
+                "В правом верхнем углу: кадры в секунду, загрузка GPU и загрузка CPU игрой (все ядра)."));
     ui_heading(UI_T("Debug views", "Vistas de depuração", "Отладка"));
     ImGui::BeginDisabled(!g_settings.ssao);
     ui_toggle("##ssao_debug", l[1], x, &g_settings.ssao_debug);
@@ -673,5 +680,6 @@ void ui_page_advanced(void) {
     if (ui_button(UI_T("Reset", "Restaurar", "Сбросить"))) {
         g_settings.ssao_debug = g_settings.gi_debug = g_settings.mv_debug = false;
         g_settings.mv_objects = true;
+        g_settings.show_fps = false;
     }
 }
