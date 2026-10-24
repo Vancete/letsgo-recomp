@@ -171,6 +171,23 @@ one pass in the present's draw, ~0.3 ms a frame at the phone's 2133x1200 - 720p 
 halves the main pass. Next levers: half precision in the materials (their ~44 texture reads keep occupancy at 15%);
 the game's 60 fps mode; clear-only passes as the next pass's load (~5%).
 
+## Frame generation on a phone
+
+- The display: Android keeps an app at 60 Hz unless it asks, so 3x / 4x at 30 fps (90 / 120 images a second) were drawn
+  and dropped. With frame generation on, the runtime asks for the images' rate (`ANativeWindow_setFrameRate`, device.c
+  `android_frame_rate`: the world's fps x the images per frame; Auto: the display's highest), and Auto knows the
+  display's refresh (`vk_display_hz`). The system still has the last word: warm, Xiaomi's thermal policy caps the
+  display at 60 Hz (`dumpsys display`: `PRIORITY_THERMAL_LIMIT_REFRESH_RATE`), whatever an app asks.
+- GPU use on the overlay barely moves between 2x, 3x and 4x: it is the GPU's busy time, and the GPU clock follows the
+  load (more work, a higher clock).
+- Re-rendering is bound by the render thread on a phone: at 4x it uses one core whole (the frame's draws again for
+  each image: ~47% of its time in the replays, the driver's `vkCmdBeginRendering` allocating for every pass) and the
+  game can fall below 30. Optical flow does no CPU replay (4x: 120 images a second, the game at 30).
+- Optical flow's block matching reads each block's frame-N samples once for all its candidates (flow_match.frag /
+  flow_refine.frag `prep`): 3.7 + 1.7 ms -> 0.25 + 0.14 ms a frame on the Adreno 830 (the same result).
+- `LARECOMP_VK_PROF` puts timers around every draw: with frame generation on a phone it costs enough to make
+  re-rendering look slower than it is (4x: 22 fps with it, 27 - 30 without).
+
 ## Known gaps
 
 - No touch controls; a controller is needed.

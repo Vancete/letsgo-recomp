@@ -1193,14 +1193,24 @@ static const char *builtin_src(const char *name, int *stage) {
             "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
             "layout(location = 0) out vec4 o;\n"
             "vec2 lsz;\n"
+            // N's 16 samples of the block, read once (prep) for all the candidates sad() tries: the same for every one
+            // (-1: the interface's, left out). Half the matching's texture reads (the phone: 3.7 ms of a frame's GPU)
+            "float na[16];\n"
+            "void prep(vec2 c) {\n"
+            "  for (int y = 0; y < 4; y++)\n"
+            "    for (int x = 0; x < 4; x++) {\n"
+            "      vec4 a = texture(L, (c + vec2(float(x * 2 - 3), float(y * 2 - 3))) / lsz);\n"
+            "      na[y * 4 + x] = a.b > 0.0 ? -1.0 : a.r;\n"
+            "    }\n"
+            "}\n"
             "float sad(vec2 c, vec2 v) {\n"
             "  float s = 0.0, n = 0.0;\n"
             "  for (int y = 0; y < 4; y++)\n"
             "    for (int x = 0; x < 4; x++) {\n"
+            "      float a = na[y * 4 + x];\n"
+            "      if (a < 0.0) continue;\n"
             "      vec2 q = c + vec2(float(x * 2 - 3), float(y * 2 - 3));\n"
-            "      vec4 a = texture(L, q / lsz);\n"
-            "      if (a.b > 0.0) continue;\n"
-            "      s += abs(a.r - texture(L, (q - v) / lsz).g); n += 1.0;\n"
+            "      s += abs(a - texture(L, (q - v) / lsz).g); n += 1.0;\n"
             "    }\n"
             "  return n > 0.0 ? s / n : 0.0;\n"
             "}\n"
@@ -1209,13 +1219,14 @@ static const char *builtin_src(const char *name, int *stage) {
             "  ivec2 ms = textureSize(mv, 0);\n"
             "  return texelFetch(mv, clamp(ivec2(c / lsz * vec2(ms)), ivec2(0), ms - 1), 0).xy * lsz;\n"
             "}\n";
-        static char src[2][4096];
+        static char src[2][8192];
         int k = !strcmp(name, "flow_refine.frag");
         if (!src[k][0] && !k)
             snprintf(src[k], sizeof src[k], "%s%s", common,
                      "void main() {\n"
                      "  lsz = 1.0 / pc.a.xy;\n"
                      "  vec2 c = (floor(gl_FragCoord.xy) + 0.5) * pc.a.w;\n"
+                     "  prep(c);\n"
                      "  vec2 va = va_at(c), best = va;\n"
                      "  float sa = sad(c, va), sb = sa, s;\n"
                      "  int R = int(pc.a.z);\n"
@@ -1240,6 +1251,7 @@ static const char *builtin_src(const char *name, int *stage) {
                      "  lsz = 1.0 / pc.a.xy;\n"
                      "  ivec2 g = ivec2(gl_FragCoord.xy), gs = textureSize(F, 0);\n"
                      "  vec2 c = (vec2(g) + 0.5) * pc.a.w;\n"
+                     "  prep(c);\n"
                      "  vec2 va = va_at(c), best = va;\n"
                      "  float sa = sad(c, va), sb = sa, s;\n"
                      "  for (int y = -1; y <= 1; y++)\n"

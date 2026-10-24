@@ -398,6 +398,7 @@ static void recreate_swapchain(void) {
 // new window (vk_frame_begin). Without it the game went on (its sound too) behind a black screen. An event watch: it
 // sees the events whichever loop takes them (the start screen's, the game's).
 static _Atomic int g_background, g_surface_new;
+static void android_frame_rate(void);  // (below: the display's refresh for the frame generation)
 static bool SDLCALL lifecycle_watch(void *ud, SDL_Event *e) {
     (void)ud;
     if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND) g_background = 1;
@@ -473,6 +474,7 @@ bool vk_frame_begin(const float clear[4]) {
     if (g_background) return false;
     if (g_surface_new) g_surface_new = 0, surface_again();
     if (!g_vk.surface) return false;
+    android_frame_rate();
 #endif
     if (!g_vk.swapchain || (uint32_t)w != g_vk.sc_extent.width || (uint32_t)h != g_vk.sc_extent.height) recreate_swapchain();
     if (!g_vk.swapchain) return false;
@@ -933,10 +935,54 @@ double vk_display_hz(void) {
         hz = (double)f.QuadPart / (double)ti.qpcRefreshPeriod;
     }
     return hz;
+#elif defined(__ANDROID__)
+    // (the display's current mode, as SDL keeps it: Android tells it when the refresh changes - android_frame_rate)
+    const SDL_DisplayMode *m = window ? SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window)) : NULL;
+    return m && m->refresh_rate > 0 ? m->refresh_rate : 0;
 #else
     return 0;
 #endif
 }
+
+#ifdef __ANDROID__
+#include <android/native_window.h>
+#include <dlfcn.h>
+// The display's refresh for the frame generation's images: Android keeps an app at 60 Hz unless it asks (this phone:
+// 60 / 90 / 120 Hz), and 3x / 4x at 30 fps were drawn and then dropped. Asked for the images' rate - the world's frame
+// rate times the images per frame; Auto: the display's highest - with ANativeWindow_setFrameRate (API 30; the system
+// picks a mode that shows it evenly); frame generation off: the system's choice again. Again for a new window (after
+// the background). Called by vk_frame_begin.
+static void android_frame_rate(void) {
+    typedef int32_t (*SetFrameRate)(ANativeWindow *, float, int8_t);
+    static SetFrameRate set = (SetFrameRate)(void *)1;
+    if (set == (SetFrameRate)(void *)1) {  // (its own library: not found in the default namespace)
+        void *lib = dlopen("libandroid.so", RTLD_NOW);
+        set = lib ? (SetFrameRate)dlsym(lib, "ANativeWindow_setFrameRate") : NULL;
+    }
+    ANativeWindow *w = window ? (ANativeWindow *)SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, NULL) : NULL;
+    if (!set || !w) {
+        static int nlog;
+        if (!nlog++) LOG("[vk] display refresh can't be asked: %s\n", !set ? "no ANativeWindow_setFrameRate" : "no window");
+        return;
+    }
+    float want = 0;
+    if (g_settings.frame_gen == FG_AUTO) {  // (the highest refresh of the display's modes)
+        int n = 0;
+        SDL_DisplayMode **ms = SDL_GetFullscreenDisplayModes(SDL_GetDisplayForWindow(window), &n);
+        for (int i = 0; ms && i < n; i++) if (ms[i]->refresh_rate > want) want = ms[i]->refresh_rate;
+        SDL_free(ms);
+        if (want <= 0) want = 120;
+    } else if (g_settings.frame_gen >= 2) {
+        want = (float)(g_settings.fps > 0 ? g_settings.fps : 30) * (float)g_settings.frame_gen;
+    }
+    static float asked = -1;
+    static ANativeWindow *asked_w;
+    if (want == asked && w == asked_w) return;
+    int32_t r = set(w, want, 1 /* ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE */);
+    LOG("[vk] display refresh asked: %s%.0f Hz (%d)\n", want > 0 ? "" : "the system's choice, ", want, r);
+    asked = want, asked_w = w;
+}
+#endif
 
 static bool vblank_grid(uint64_t *vb, uint64_t *vp) {
 #ifdef _WIN32

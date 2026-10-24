@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Frame generation, optical flow: block matching ~10x cheaper** - each block's samples of frame N are read once for
+  all the candidates instead of once per candidate (the same result): Adreno 830, 3.7 + 1.7 ms -> 0.25 + 0.14 ms a frame.
+- **Android: the display's refresh follows the frame generation** (the world's fps x its images per frame; Auto: the
+  display's highest), asked with `ANativeWindow_setFrameRate` - left at 60 Hz, 3x / 4x images were drawn and dropped.
+  A warm phone may still cap it at 60 Hz (thermal policy).
+
 - **Upscaler: Snapdragon GSR** (F12 Graphics, *Upscaler*, with any anti-aliasing but FSR 3.1; `upscaler = gsr` in
   larecomp.ini): Qualcomm's Game Super Resolution 1 (BSD 3-Clause, third_party/snapdragon-gsr) brings a render
   resolution below the window's up to it in the present's own draw - a 12-tap Lanczos-like filter with adaptive
