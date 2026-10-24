@@ -490,6 +490,41 @@ código em `runtime/hle/wildbattle.c`; opção "Batalhas selvagens (experimental
   principal é NVIDIA (`EnumDisplayDevices`, antes de o Vulkan existir); nas outras placas `LARECOMP_WRITE_WATCH=1` liga,
   e o log diz se ficou ligado. Numa placa que recuse a importação, o log mostra "guest heap import failed".
 
+## O Finish de cada quadro: a thread de renderização deixava o jogo mais lento (23/10/2026)
+
+- **Sintoma.** Sem limite de fps e com a GPU folgada (efeitos desligados, ou 4K com só SMAA), o jogo andava mais
+  devagar com a thread de renderização do que sem ela: Pallet Town (Pikachu) 122 fps ligada contra 179 desligada,
+  3 + 3 rodadas intercaladas. O contrário do que o item 59 mediu em Pewter.
+- **Diagnóstico.** Amostragem das threads (ponteiro de instrução e endereços de retorno na pilha): nenhuma thread
+  saturada (render 31-39 %, as três do jogo 21-31 %), todas esperando umas pelas outras. Contadores temporários no
+  `nvnSyncWait` / `nvnQueueFinish`: um `nvnQueueFinish` por quadro, ~4,4 ms cada (esvaziar a fila da thread de
+  renderização e depois esperar a GPU). Chamado sempre do mesmo ponto do laço de quadros do jogo (Pikachu
+  `main+0x29eec`): `fdiv d0, d0, 1e6` / `fmov d1, #4.0` / `fcmp` / `b.pl` - o jogo só chama o Finish quando o tempo de GPU
+  que ele mediu no quadro anterior (os dois `ReportCounter`, em ns) ficou abaixo de 4 ms. Os contadores medem o nosso
+  tempo de tradução, sempre abaixo de 4 ms: Finish em todo quadro, e jogo, thread de renderização e GPU em série.
+- **Correção.** Com a thread de renderização, esse Finish segue o caminho que o próprio jogo usa quando a GPU leva
+  4 ms ou mais (sem Finish; os fences dele continuam valendo). O ponto é reconhecido pelas instruções (endereço de
+  retorno e as quatro antes da chamada; padrão único no `main`), não por endereço. Os outros Finish (o mesmo laço
+  chama outro quando o modo de vídeo muda) não mudam. `LARECOMP_FRAME_FINISH=1` volta ao antigo.
+- **De passagem.** `CMD_FENCE_SYNC` (fence gravado numa lista) lia `x[1]` (a condição, sempre 0) em vez de `x[0]` (o
+  sync): esses fences nunca eram marcados. Corrigido; com a thread de renderização o sync recebe, quando a lista é
+  enviada, o ticket do trabalho que a executa (`nvn_list_*`, `objects.c`), e o `nvnSyncWait` espera só esse trabalho.
+  O Let's Go não usa fences em listas (as esperas sem fence são do sync do `nvnWindowAcquireTexture`): sem efeito aqui.
+  `rt_dispatch` (chamadas indiretas do jogo): a busca lenta saiu da função, que salvava 5 registradores e montava a
+  pilha em todo acerto do cache; `rt_fnhook` olha a tabela de ganchos antes da variável por thread. +1,5 % (4 + 4).
+- **Medido** (RTX 5070 Ti, 4K tela cheia, sem efeitos: `aa = off`, SSAO / GI / blur / sombras suaves desligados;
+  sem limite de fps, rodadas intercaladas, mesmo save copiado): Pallet Town parado 145 -> 307-313 fps (3 + 3 e 4 + 4), menu
+  aberto 140 -> 300, rota até a Rota 1 147 -> 260, andando em Pallet Town tempo médio por quadro 8,5 -> 5,0 ms (P95 8,4 ->
+  4,7); sem thread de renderização 204 -> 211. Com limite: 30, 60 e 120 fps e geração de quadros x2 com o mesmo ritmo e
+  P95/P99 da build anterior. Imagens dentro da variação entre duas rodadas da mesma build (PSNR 29-36 dB contra
+  27-33); captura completa de um Pidgey na Rota 1 sem defeito.
+- **Agora.** Com a thread de renderização ~50-70 % ocupada, o limite são as três threads do jogo (código recompilado
+  ~87 % do tempo ativo delas). A função mais pesada, `f_7000608b30` (Pikachu), ~13 %: busca linear por hash que
+  recalcula o FNV-1a do nome de cada candidato, byte a byte - o algoritmo do próprio jogo. `rt_fnhook` (todo início de
+  função, porque sempre há ganchos) ~4 % e `rt_dispatch` ~3 %: baixá-los exige mudar o `FN_ENTER` e recompilar o
+  código do jogo. Compilar o código do jogo com -O2 não muda nada: o `zig cc` do jogador gera objetos idênticos com
+  -O1, -O2 e -O3.
+
 ## Batalhas selvagens: capturar no meio da batalha, com um 5º botão nativo (23/10/2026)
 Pedido: capturar a qualquer momento da batalha, mais fácil com o selvagem fraco ou com status, uma bola por vez (escapou
 → volta à batalha), desmaiou = perdeu a chance, e uma opção nova e nativa no menu. Pesquisa e endereços em
@@ -666,3 +701,44 @@ Pedido: capturar a qualquer momento da batalha, mais fácil com o selvagem fraco
 - **Correção.** Slot de comparação sem textura de profundidade recebe uma imagem de profundidade 1x1 em 1,0
   (`vk_dummy_depth_view`): tudo iluminado, como contra a textura branca. Validação limpa em batalha com Wrap (3 usos);
   imagens iguais. Se era a causa do travamento da 5070 só o autor da issue pode confirmar.
+
+## 0.7.0: atualizar por cima pedia a pasta do jogo de novo (24/10/2026, corrigido na 0.7.1)
+- **Sintoma.** Com a 0.7.0 descompactada sobre uma pasta da 0.6.0, o launcher mostrava a configuração inicial
+  ("Selecione a pasta do jogo extraído"), não a recompilação.
+- **Causa.** O PR #26 pôs o nível da CPU no id da biblioteca (`<id>-v3` / `-v2`); a da 0.6.0 (`<id>` sem sufixo) deixou
+  de servir, `setup_ready()` ficou falso e nada chamava `setup_start(NULL)` (só o código do jogo, já previsto em
+  `gamesetup.c`). Nas versões anteriores o id não tinha mudado, então o caso nunca apareceu.
+- **Como passou.** O teste da release nas pastas `D:\teste-0.7.0` não chegou a rodar a 0.7.0: os `lasrecomp.log` e as
+  DLLs delas ainda eram as cópias da 0.6.0; não conferi isso antes de publicar. Minha tentativa automática com
+  `LARECOMP_LAUNCHER_AUTOPLAY` ficou parada no launcher (ele só joga quando já está pronto).
+- **Correção (0.7.1).** `setup_needs_build()` (arquivos do jogo instalados, biblioteca de outra versão) e o launcher
+  chama `setup_start(NULL)` sozinho, uma vez. Testado numa cópia da pasta da 0.6.0 com a 0.7.1 por cima: recompilou
+  sozinho (id `...-v3`) e o jogo rodou até a gameplay.
+- **Lição.** Antes de publicar, conferir nas pastas de teste o log e a DLL da versão nova (data e id), não só a
+  resposta do teste; e testar o caminho de quem atualiza (pasta da versão anterior com a nova por cima).
+
+## Pisca-pisca das árvores em batalha com TAA (24/10/2026, não é regressão)
+- **Relato (usuário, testando a 0.7.1).** A vegetação pisca nas batalhas.
+- **Medida.** Quadros seguidos de uma batalha fixa, pixels da parte de cima que sobem e descem (±24) em três quadros:
+  TAA 1,1 %, SMAA 0,05 %; SSAO Ultra pouco muda (0,9 % sem). 0.6.0 e 0.7.1 com a batalha parada: iguais (0,44–0,78 %
+  contra 0,33–1,09 %). Uma primeira comparação parecia mostrar piora, mas o runtime da 0.6.0 ignorava as entradas
+  `b<N>` do roteiro (a batalha ficava parada) - comparar só com roteiros que as duas versões entendem.
+- **Pendente.** O TAA nas folhas recortadas das árvores em batalha (com ação); SMAA não tem.
+
+## Issue #30: "Make the 2x images" falhava numa AMD integrada (24/10/2026)
+- **Log.** O waifu2x gerou as 4708 imagens (saída 0), mas de volta a 1x 2981 das 3081 texturas ficaram longe do
+  original (média > 16): o pacote foi recusado. Ao mesmo tempo o launcher avisou "GPU did not finish submission
+  within 10 s": a GPU integrada, compartilhada, não dava conta do waifu2x e do nosso desenho juntos.
+- **O que não serve.** O modo CPU do waifu2x-ncnn-vulkan 20250915 (`-g -1`) dá falha de segmentação (testado aqui, com
+  e sem `-t`).
+- **Correção.** Se a saída falha ou é recusada, uma segunda vez mais leve: blocos de 32 e uma thread por etapa
+  (`-t 32 -j 1:1:1`). Na RTX 3080 (`LARECOMP_UI2X_GENTLE=1`): 4708 imagens, nenhuma recusada (maior erro 7,35), ~5 min.
+  Se resolve na AMD integrada só o autor da issue pode dizer.
+
+## Issue #24 na 0.7.0: validação completa no Wrap, sem erro (24/10/2026)
+- **Relato.** Mesma queda na RTX 5070 Laptop com a 0.7.0 (sem 60 fps); a GPU reinicia; com a Intel integrada não
+  acontece; algo parecido num recomp de outro jogo.
+- **Feito aqui (RTX 3080).** Batalha com Bellsprout só com Wrap: validação de núcleo, depois GPU-AV (shaders
+  instrumentados), e GPU-AV com `LARECOMP_NO_ROBUST=1` (acessos fora dos limites que a robustez esconde): nenhum erro.
+  Aponta para o driver ou a placa; pedidos ao autor: versão do driver e testes desligando o que só a NVIDIA usa
+  (`LARECOMP_WRITE_WATCH=0`, `LARECOMP_VK_NO_GMEM=1`, `LARECOMP_VERTEX_READ=copy`, `LARECOMP_ONE_QUEUE=1`).
