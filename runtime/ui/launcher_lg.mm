@@ -479,7 +479,8 @@ extern "C" void launcher_lg_run(const char *root) {
     int res = 0;
     for (int i = 0; i < 5; i++) if (res_lines[i] == g_settings.res_height) res = i;
     bool ui2x_on = g_settings.ui2x;  // (the interface at 2x: runtime/ui2x.c)
-    bool full = g_settings.fullscreen, wildb = g_settings.wild_battle, skipc = g_settings.skip_controller, uwide = g_settings.ultrawide;
+    bool full = g_settings.fullscreen, wildb = g_settings.wild_battle, skipc = g_settings.skip_controller, uwide = g_settings.ultrawide,
+         gyro = g_settings.gyro_aim;
     mods_reload(g_settings.mod);  // (the folders under mods/: runtime/mods.h)
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     bool autoplay = getenv("LARECOMP_LAUNCHER_AUTOPLAY") != NULL, play = false;
@@ -647,8 +648,9 @@ extern "C" void launcher_lg_run(const char *root) {
                 ui_heading(T("Options", "Opções"));
                 // A / B and X / Y by the layout's positions (runtime/hle/bindings.c bind_set_layout)
                 const char *ol[] = {T("Wild battles (experimental)", "Batalhas selvagens (experimental)"),
-                                    T("Skip controller selection", "Pular a escolha do controle"), T("Controller layout", "Layout do controle")};
-                float ox = ui_label_x(ol, 3);
+                                    T("Skip controller selection", "Pular a escolha do controle"), T("Controller layout", "Layout do controle"),
+                                    T("Gyro aiming", "Mirar com giroscópio")};
+                float ox = ui_label_x(ol, 4);
                 ImGui::BeginDisabled(!known);
                 ui_toggle("##wild", ol[0], ox, &wildb);
                 ui_tip(!known ? only : T("Touching a wild Pokémon starts a classic battle, then the capture, instead of going straight to the capture.",
@@ -661,6 +663,9 @@ extern "C" void launcher_lg_run(const char *root) {
                 int lv = bind_layout();
                 ui_row(ol[2], ox);
                 if (ui_combo("##padlayout", &lv, lay, 2)) bind_set_layout(lv);
+                ui_toggle("##gyro", ol[3], ox, &gyro);
+                ui_tip(T("Aiming a Poké Ball turns with the controller's gyroscope (DualSense, DualShock 4, Switch Pro, Joy-Con) or, without one, the phone's or tablet's - as in handheld mode on the Switch. The stick and the mouse still aim.",
+                         "Ao mirar uma Poké Ball, a mira gira com o giroscópio do controle (DualSense, DualShock 4, Switch Pro, Joy-Con) ou, sem ele, o do celular ou tablet - como no modo portátil do Switch. O analógico e o mouse continuam mirando."));
                 ui_tip(T("Which controller buttons are A / B and X / Y. Nintendo: A right, B bottom. Xbox: A bottom, B right, as the letters on an Xbox controller. The button prompts follow.",
                          "Quais botões do controle são A / B e X / Y. Nintendo: A à direita, B embaixo. Xbox: A embaixo, B à direita, como as letras de um controle de Xbox. Os ícones dos botões acompanham."));
             } else if (tab == TAB_GRAPHICS) {
@@ -703,6 +708,7 @@ extern "C" void launcher_lg_run(const char *root) {
     settings_apply_levels();  // (the upscaler follows the anti-aliasing)
     g_settings.wild_battle = wildb;
     g_settings.skip_controller = skipc;
+    g_settings.gyro_aim = gyro;
     g_settings.ultrawide = uwide;
     g_settings.ui2x = ui2x_on;
     mods_active(g_settings.mod, sizeof g_settings.mod);

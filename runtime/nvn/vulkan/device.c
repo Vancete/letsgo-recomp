@@ -1331,6 +1331,7 @@ void ui_window_init(void) {
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     settings_load();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
+    if (!SDL_InitSubSystem(SDL_INIT_SENSOR)) LOG("[input] no sensors: %s\n", SDL_GetError());  // (gyro aiming: hle/input.c)
     input_load_user_mappings();
     int win_w = 1280, win_h = 720;
     if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &win_w, &win_h);
@@ -1404,6 +1405,8 @@ int ui_run(void) {
             if (menu_handle_event(&e)) continue;
             input_handle_event(&e);
         }
+        extern void input_poll(void);
+        input_poll();  // (gyro aiming: its sensor on while the game aims)
         menu_apply_window_requests(window);
     }
 }

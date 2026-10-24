@@ -58,6 +58,7 @@ Settings g_settings = {
     .reverb = true,
     .movie_audio = true,
     .show_fps = false,
+    .gyro_aim = true,
     .render_thread = true,
     .vertex_read = VREAD_AUTO,
     .upscaler = UPSCALE_SHARP,
@@ -150,6 +151,7 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
     else if (!strcmp(key, "wild_battle")) g_settings.wild_battle = atoi(val) != 0;
     else if (!strcmp(key, "skip_controller")) g_settings.skip_controller = atoi(val) != 0;
+    else if (!strcmp(key, "gyro_aim")) g_settings.gyro_aim = atoi(val) != 0;
     else if (!strcmp(key, "ultrawide")) g_settings.ultrawide = atoi(val) != 0;
     else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
 }
@@ -326,6 +328,7 @@ void settings_save(void) {
     fprintf(f, "dpad_move = %d\n", g_settings.dpad_move);
     fprintf(f, "wild_battle = %d\n", g_settings.wild_battle);
     fprintf(f, "skip_controller = %d\n", g_settings.skip_controller);
+    fprintf(f, "gyro_aim = %d\n", g_settings.gyro_aim);
     fprintf(f, "ultrawide = %d\n", g_settings.ultrawide);
     fprintf(f, "game_lang = %s\n", g_settings.game_lang);
     bind_settings_save(f);

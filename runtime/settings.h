@@ -87,6 +87,7 @@ typedef struct {
     int vertex_read;     // VREAD_*: where the GPU reads vertex and index data (runtime/nvn/vulkan/exec.c)
     bool wild_battle;    // touching a wild Pokémon starts a battle, then the capture (runtime/hle/wildbattle.c)
     bool skip_controller;  // no controller screen at start: straight to the Game Freak logo (runtime/hle/controller_skip.c)
+    bool gyro_aim;       // aiming Poke Balls with a real gyroscope, the controller's or the device's (runtime/hle/input.c)
     bool ultrawide;      // (experimental) a screen wider than 16:9 filled, the interface in a centred 16:9 box (runtime/hle/widescreen.c)
     char game_lang[8];   // the game's language code ("en-US", "es"...: runtime/mods.c game_language)
     char mod[1024];      // the active mods (mods/<name>/), '|' between them, the first one's files win; empty = none (runtime/mods.h)
