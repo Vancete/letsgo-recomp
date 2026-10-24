@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.3 (2026-10-24)
+
+- **Fix: a game data image the game can't read closed the game at start with 2002-6063** (issue #31). The setup now
+  checks `extracted/romfs.bin` (cut short, or another tool's format), the start screen says so and asks for the game
+  folder again, and the game stops with a clear message instead.
+
 ## 0.7.2 (2026-10-24)
 
 Iván Serrano's ([@Vancete](https://github.com/Vancete), PRs #25 and #23): up to twice the frame rate when the CPU is
