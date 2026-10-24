@@ -1068,6 +1068,25 @@ static bool ip_enabled(void) {
     return g_settings.frame_gen >= FG_AUTO || ip_on > 0 || fps60_menu();
 }
 static const void *ip_cbuf(int stage, int k, uint64_t addr, uint32_t size);
+static bool ssao_proj_at(const float *m, float out[4]);  // (a perspective projection: below)
+// Wide screens (runtime/hle/widescreen.c): a copy of a vertex constant block whose 16:9 perspective projections (in its
+// first 512 bytes) take the window's aspect - their P00 scaled by 16/9 / aspect; NULL when off or none there. The
+// camera the effects read (occlusion, indirect light, motion vectors), as the draws are widened (ShaderKey.widen).
+static const uint8_t *wide_block(const uint8_t *src, uint32_t size) {
+    extern float widescreen_aspect(void);
+    float wa = widescreen_aspect();
+    if (wa <= 1.0f || !src || size > 0x1000) return NULL;
+    static uint8_t buf[0x1000];
+    bool any = false;
+    for (uint32_t o = 0; o + 64 <= size && o < 512; o += 16) {
+        const float *m = (const float *)(src + o);
+        float pj[4];
+        if (!ssao_proj_at(m, pj) || fabsf(pj[1] / pj[0] - 16.0f / 9.0f) > 0.01f) continue;
+        if (!any) memcpy(buf, src, size), any = true;
+        ((float *)(buf + o))[0] = m[0] * (16.0f / 9.0f) / wa;
+    }
+    return any ? buf : NULL;
+}
 static void ip_note_list(uint64_t handle);
 static bool ip_skip_op(uint32_t op) {  // what the replay must not do again: it writes guest memory or signals the game
     switch (op) {
@@ -3389,11 +3408,15 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     }
     for (int i = 0; i < p->nbinds; i++) {
         VkBindingInfo *b = &p->binds[i];
-        if (b->set != set || b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || (b->binding != 18 && b->binding != 19 && b->binding != 20)) continue;
+        if (b->set != set || b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || b->binding < 18 || b->binding > 21) continue;
         w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
                                       .descriptorCount = 1, .descriptorType = b->type};
         if (b->binding == 20) {  // (TAA: this frame's jitter)
             bi[n] = ubo_span(vk_transient_copy(taa_jitter(), 16, 256), 16);
+        } else if (b->binding == 21) {  // (wide screens: ShaderKey.widen's scale)
+            extern float widescreen_aspect(void);
+            float wa = widescreen_aspect(), wv[4] = {wa > 1.0f ? (16.0f / 9.0f) / wa : 1.0f, 0, 0, 0};
+            bi[n] = ubo_span(vk_transient_copy(wv, 16, 256), 16);
         } else if (b->binding == 18) {
             for (int t = 0; t < si->ntex && t < 64; t++) { rs[1 + t][0] = tex_sc[sg][t][0]; rs[1 + t][1] = tex_sc[sg][t][1]; }
             bi[n] = ubo_span(copy_dedupe(sg ? DEDUPE_RSCALE_F : DEDUPE_RSCALE_V, rs, sizeof rs, 256), sizeof rs);
@@ -3757,6 +3780,8 @@ static void ssao_find_projection(void) {
             return;
         }
         float proj[4];
+        const uint8_t *wb = wide_block(blk, bsz);  // (wide screens: the camera as the draws have it)
+        if (wb) blk = wb;
         if (blk && ao.poff + 64 <= bsz && ssao_proj_at((const float *)(blk + ao.poff), proj) &&
             !cam_at_origin((const float *)(blk + ao.poff))) {
             memcpy(ao.proj, proj, sizeof ao.proj);
@@ -3897,6 +3922,12 @@ static void draw_(CmdRec *r, bool indexed) {
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.jitter = jitter_on() && st.rt.depth && st.rt.depth == ao.dtex && st.ds[0];  // (TAA, FSR 3)
+    {   // wide screens: draws into the screen-shaped images (scalable: the scene, its depth, its effects' smaller ones)
+        extern float widescreen_aspect(void);
+        TexBackend *c0 = st.rt.ncolor && st.rt.color[0] ? st.rt.color[0]->backend : NULL;
+        TexBackend *d0 = st.rt.depth ? st.rt.depth->backend : NULL;
+        vkey.widen = widescreen_aspect() > 1.0f && ((c0 && c0->scalable) || (d0 && d0->scalable));
+    }
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
@@ -3954,7 +3985,10 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     resolve_feedback(pr);
     // (FSR 3: the interface mask; frame generation: the real frames' mask, for their in-between images - ip_ui_keep)
-    if (((g_settings.upscaler == UPSCALE_FSR3 && fsr3_on()) || (g_settings.frame_gen && ip_enabled())) && !ip_replaying) ui_snapshot_check(pr);
+    extern float widescreen_aspect(void);  // (wide screens: the interface's image, ui_scene_rt, for its centred 16:9 box)
+    if (((g_settings.upscaler == UPSCALE_FSR3 && fsr3_on()) || (g_settings.frame_gen && ip_enabled()) || widescreen_aspect() > 1.0f) &&
+        !ip_replaying)
+        ui_snapshot_check(pr);
     snap_reason = "draw-depthwrite";
     if (st.rt.depth && st.ds[0] && st.ds[1]) snapshots_invalidate(st.rt.depth);
     snap_reason = "draw-colorwrite";
@@ -4130,7 +4164,11 @@ static void draw_(CmdRec *r, bool indexed) {
         tex_sc[1][i][0] = sc[0]; tex_sc[1][i][1] = sc[1]; tex_wh[1][i][0] = wh[0]; tex_wh[1][i][1] = wh[1];
     }
     if (prof) prof_tex += SDL_GetTicksNS() - prof_tx_;
-    if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
+    // (wide screens: also the full-screen images the game draws its interface into before its last pass - two, one
+    // frame each - their draws without a depth test; the 3D ones there, with the scene's depth, stay the scene's)
+    TexBackend *rt0b = st.rt.ncolor && st.rt.color[0] ? st.rt.color[0]->backend : NULL;
+    bool ui_rt = widescreen_aspect() > 1.0f && rt0b && rt0b->scalable && st.rt.color[0]->width >= 1280 && !dt;
+    if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && (renderer_texture_presented(st.rt.color[0]) || ui_rt)) {
         // Draws into the swapchain image (see renderer.m): composites fill the window, UI goes in a centred 16:9 box.
         bool reads_scene = false;
         for (int i = 0; i < pr->fi->ntex && i < 64; i++)
@@ -4140,7 +4178,11 @@ static void draw_(CmdRec *r, bool indexed) {
         bool fullscreen_quad = r->x[2] <= 6 && st.viewport[0][0] == 0 && st.viewport[0][1] == 0 &&
                                st.viewport[0][2] >= st.rt.color[0]->width && st.viewport[0][3] >= st.rt.color[0]->height;
         bool fullscreen_fill = pr->fi->ntex == 0 && fullscreen_quad;
-        if (fullscreen_quad && !reads_scene && pr->fi->ntex == 1 && (tex_sc[1][0][0] != 1 || tex_sc[1][0][1] != 1)) reads_scene = true;
+        if (fullscreen_quad && !reads_scene && pr->fi->ntex == 1 && (tex_sc[1][0][0] != 1 || tex_sc[1][0][1] != 1)) {
+            // (a scene image: not the interface's own 2x images and text cache, scaled too - runtime/ui2x.c, font_hires.c)
+            NvnTexture *t0 = shader_texture_object(1, &pr->fi->tex[0]);
+            if (t0 && t0->backend && ((TexBackend *)t0->backend)->scalable) reads_scene = true;
+        }
         static uint64_t wide_frame = ~0ull;
         if (reads_scene) wide_frame = renderer_present_count();
         bool fade_fill = false;

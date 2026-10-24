@@ -479,7 +479,7 @@ extern "C" void launcher_lg_run(const char *root) {
     int res = 0;
     for (int i = 0; i < 5; i++) if (res_lines[i] == g_settings.res_height) res = i;
     bool ui2x_on = g_settings.ui2x;  // (the interface at 2x: runtime/ui2x.c)
-    bool full = g_settings.fullscreen, wildb = g_settings.wild_battle, skipc = g_settings.skip_controller;
+    bool full = g_settings.fullscreen, wildb = g_settings.wild_battle, skipc = g_settings.skip_controller, uwide = g_settings.ultrawide;
     mods_reload(g_settings.mod);  // (the folders under mods/: runtime/mods.h)
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     bool autoplay = getenv("LARECOMP_LAUNCHER_AUTOPLAY") != NULL, play = false;
@@ -664,12 +664,16 @@ extern "C" void launcher_lg_run(const char *root) {
                 ui_tip(T("Which controller buttons are A / B and X / Y. Nintendo: A right, B bottom. Xbox: A bottom, B right, as the letters on an Xbox controller. The button prompts follow.",
                          "Quais botões do controle são A / B e X / Y. Nintendo: A à direita, B embaixo. Xbox: A embaixo, B à direita, como as letras de um controle de Xbox. Os ícones dos botões acompanham."));
             } else if (tab == TAB_GRAPHICS) {
-                const char *extra[] = {T("Resolution", "Resolução"), T("Fullscreen", "Tela cheia")};
-                float x = ui_graphics_x(extra, 2);
+                const char *extra[] = {T("Resolution", "Resolução"), T("Fullscreen", "Tela cheia"),
+                                       T("Ultrawide support (experimental)", "Suporte ultrawide (experimental)")};
+                float x = ui_graphics_x(extra, 3);
                 ui_row(extra[0], x);
                 ui_combo("##res", &res, g_pt ? res_pt : res_en, 5);
                 ui_toggle("##full", extra[1], x, &full);
                 ui_tip(T("When the game starts.", "Ao começar o jogo."));
+                ui_toggle("##ultrawide", extra[2], x, &uwide);
+                ui_tip(T("A screen wider than 16:9 is filled with the game's image instead of black bars at its sides; the interface stays in a centred 16:9 box.",
+                         "Uma tela mais larga que 16:9 é preenchida com a imagem do jogo em vez de faixas pretas nas laterais; a interface fica numa área 16:9 centralizada."));
                 ui_group_gap();
                 ui_page_graphics(x, known);
                 ui2x_section(ready, &ui2x_on);
@@ -699,6 +703,7 @@ extern "C" void launcher_lg_run(const char *root) {
     settings_apply_levels();  // (the upscaler follows the anti-aliasing)
     g_settings.wild_battle = wildb;
     g_settings.skip_controller = skipc;
+    g_settings.ultrawide = uwide;
     g_settings.ui2x = ui2x_on;
     mods_active(g_settings.mod, sizeof g_settings.mod);
     settings_save();

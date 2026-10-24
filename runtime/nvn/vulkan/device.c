@@ -744,12 +744,19 @@ static void present_image(TexBackend *b, bool final, int image, int nimg, uint64
         // render scale + placement in the window (the game's 16:9 image, fitted): runtime/nvn/output_scale.c;
         // no GPU timer here (-1): dynamic resolution goes by the frame time
         OutScale os;
-        output_scale(dw, dh, false, SDL_GetTicksNS() / 1e9, -1, &os);
+        // (wide screens, prototype: runtime/hle/widescreen.c - the image fills a window wider than 16:9, the camera widened)
+        extern float widescreen_aspect(void);
+        extern void widescreen_window(double w, double h);
+        widescreen_window(dw, dh);
+        bool wide = widescreen_aspect() > 1.0f;
+        output_scale(dw, dh, wide, SDL_GetTicksNS() / 1e9, -1, &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh;
         float crop[4] = {0, 0, 1, 1};  // uv origin and size: the whole image
-        {   // where the game image is in the window (pixels): the mouse as a finger on the touch screen (hle/input.c)
+        {   // where the game image is in the window (pixels): the mouse as a finger on the touch screen (hle/input.c) -
+            // reshaped, the interface's centred 16:9 box
             extern double g_present_rect[4];
-            g_present_rect[0] = vx, g_present_rect[1] = vy, g_present_rect[2] = vw, g_present_rect[3] = vh;
+            double bw = wide && os.shape > 1 ? vw / os.shape : vw, bh = wide && os.shape < 1 ? vh * os.shape : vh;
+            g_present_rect[0] = vx + (vw - bw) / 2, g_present_rect[1] = vy + (vh - bh) / 2, g_present_rect[2] = bw, g_present_rect[3] = bh;
         }
         renderer_set_scale((float)sx, (float)sy);
         VkCommandBuffer cb = vk_cmd();

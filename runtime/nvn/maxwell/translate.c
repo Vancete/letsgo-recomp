@@ -2026,6 +2026,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg, char *flags) {
             if (c->out_attr_mask & (1u << i)) sp(&s, "layout(location = %d) out vec4 v%d;\n", i, i);
         if (vel_vs) sp(&s, "layout(location = 30) out vec4 mv_prev_;\nlayout(location = 31) out vec4 mv_cur_;\n");
         if (key && key->jitter && !dbg) sp(&s, "layout(std140, set = 0, binding = 20) uniform Jit { vec4 jit; };\n");
+        if (key && key->widen && !dbg) sp(&s, "layout(std140, set = 0, binding = 21) uniform Wide { vec4 wide_; };\n");
     } else if (stage == STAGE_FRAGMENT) {
         if (vel_fs)
             sp(&s, "layout(location = 30) in vec4 mv_prev_;\nlayout(location = 31) in vec4 mv_cur_;\n"
@@ -2089,6 +2090,10 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg, char *flags) {
     free(pre.buf);
     free(body.buf);
     if (stage == STAGE_VERTEX) {
+        if (key && key->widen && !dbg) {
+            sp(&s, "  if (gl_Position.w != 1.0f) gl_Position.x *= wide_.x;\n");
+            if (vel_vs) sp(&s, "  if (mv_cur_.w != 1.0f) mv_cur_.x *= wide_.x;\n  if (mv_prev_.w != 1.0f) mv_prev_.x *= wide_.x;\n");
+        }
         if (key && key->jitter && !dbg) sp(&s, "  gl_Position.xy += jit.xy * gl_Position.w;\n");
         if (key && key->flip_y) sp(&s, "  gl_Position.y = -gl_Position.y;\n");
         if (key && key->depth_minus_one) sp(&s, "  gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5f;\n");

@@ -54,6 +54,10 @@ typedef struct {
     // vertex: TAA's sub-pixel jitter (exec.c taa_*): clip xy += jit.xy * w, from a uniform at binding 20, after the
     // positions the velocity is computed from (the velocity carries no jitter)
     uint8_t jitter;
+    // vertex: wide screens (runtime/hle/widescreen.c) - clip x of a perspective position (w != 1) scaled by wide_.x, from a
+    // uniform at binding 21, before the jitter; the velocity's two positions too. The game's 16:9 projections, whichever
+    // matrix carries them (a character's is one the game multiplied itself), at the window's aspect.
+    uint8_t widen;
 } ShaderKey;
 
 typedef struct {
