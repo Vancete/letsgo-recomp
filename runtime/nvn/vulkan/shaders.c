@@ -1062,7 +1062,9 @@ static const char *builtin_src(const char *name, int *stage) {
     // search replaced it). a.xy = 1 / the luminance's size, b.x = 1: motion vectors bound. (Every pixel of the search: 0.50
     // ms at 4K, the grid too small to fill the GPU; in steps of 2, 0.2.)
     // flow_refine.frag: again from the best of each block's and its 8 neighbours' results (spreading a good vector),
-    // then +-1 and +-0.5 pixel around it (bilinear: sub-pixel), against the analytic vector.
+    // then +-1 and +-0.5 pixel around it (bilinear: sub-pixel), against the analytic vector. Neither searches where
+    // the analytic vector's difference is 0.005 or less: nothing could win by the margin (the same result) - most of
+    // the ground and the background.
     if (!strcmp(name, "flow_match.frag") || !strcmp(name, "flow_refine.frag")) {
         *stage = STAGE_FRAGMENT;
         static const char *common =
@@ -1109,6 +1111,7 @@ static const char *builtin_src(const char *name, int *stage) {
                      "  prep(c);\n"
                      "  vec2 va = va_at(c), best = va;\n"
                      "  float sa = sad(c, va), sb = sa, s;\n"
+                     "  if (sa <= 0.005) { o = vec4(va / lsz, va / lsz); return; }\n"
                      "  int R = int(pc.a.z);\n"
                      "  vec2 v0 = floor(va + 0.5);\n"
                      "  for (int y = -R; y <= R; y += 2)\n"
@@ -1134,6 +1137,7 @@ static const char *builtin_src(const char *name, int *stage) {
                      "  prep(c);\n"
                      "  vec2 va = va_at(c), best = va;\n"
                      "  float sa = sad(c, va), sb = sa, s;\n"
+                     "  if (sa <= 0.005) { o = vec4(va / lsz, va / lsz); return; }\n"
                      "  for (int y = -1; y <= 1; y++)\n"
                      "    for (int x = -1; x <= 1; x++) {\n"
                      "      vec2 v = texelFetch(F, clamp(g + ivec2(x, y), ivec2(0), gs - 1), 0).xy * lsz;\n"

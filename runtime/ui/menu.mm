@@ -30,6 +30,8 @@ extern "C" {
 void input_reset(void);
 uint64_t rt_addr(uint64_t eevee);  // runtime/fnhook.c (0: a build without the tables the frame rate modes need)
 bool input_finger_cursor(float *x, float *y, bool *down);  // runtime/hle/input.c
+uint64_t renderer_window_images(void);  // runtime/nvn/vulkan/device.c (the images that reached the window)
+uint64_t plat_now_ns(void);
 }
 
 // ------------------------------------------------------------------ language
@@ -584,13 +586,22 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     ImGui::NewFrame();
 
     if (g_settings.show_fps) {
+        // the images that reached the window, frame generation's included, over half a second (ImGui's own rate counts
+        // this overlay's frames: the optical flow draws a present's images at once - 68 shown for 120)
+        static uint64_t t0, img0;
+        static double fps = -1;
+        uint64_t t = plat_now_ns(), img = renderer_window_images();
+        if (!t0 || t - t0 >= 500000000) {
+            if (t0 && t > t0) fps = 1e9 * (double)(img - img0) / (double)(t - t0);
+            t0 = t, img0 = img;
+        }
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 16 * scale, 16 * scale), 0, ImVec2(1, 0));
         ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0.5f));  // (dark: over the game, not the menus' look)
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10 * scale);
         ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
-        ImGui::Text("%.0f fps", io.Framerate);
+        ImGui::Text("%.0f fps", fps >= 0 ? fps : io.Framerate);
         ImGui::End();
         ImGui::PopStyleVar();
         ImGui::PopStyleColor(2);
