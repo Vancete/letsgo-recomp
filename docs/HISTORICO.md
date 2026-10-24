@@ -689,3 +689,21 @@ Pedido: capturar a qualquer momento da batalha, mais fácil com o selvagem fraco
   contra 0,33–1,09 %). Uma primeira comparação parecia mostrar piora, mas o runtime da 0.6.0 ignorava as entradas
   `b<N>` do roteiro (a batalha ficava parada) - comparar só com roteiros que as duas versões entendem.
 - **Pendente.** O TAA nas folhas recortadas das árvores em batalha (com ação); SMAA não tem.
+
+## Issue #30: "Make the 2x images" falhava numa AMD integrada (24/10/2026)
+- **Log.** O waifu2x gerou as 4708 imagens (saída 0), mas de volta a 1x 2981 das 3081 texturas ficaram longe do
+  original (média > 16): o pacote foi recusado. Ao mesmo tempo o launcher avisou "GPU did not finish submission
+  within 10 s": a GPU integrada, compartilhada, não dava conta do waifu2x e do nosso desenho juntos.
+- **O que não serve.** O modo CPU do waifu2x-ncnn-vulkan 20250915 (`-g -1`) dá falha de segmentação (testado aqui, com
+  e sem `-t`).
+- **Correção.** Se a saída falha ou é recusada, uma segunda vez mais leve: blocos de 32 e uma thread por etapa
+  (`-t 32 -j 1:1:1`). Na RTX 3080 (`LARECOMP_UI2X_GENTLE=1`): 4708 imagens, nenhuma recusada (maior erro 7,35), ~5 min.
+  Se resolve na AMD integrada só o autor da issue pode dizer.
+
+## Issue #24 na 0.7.0: validação completa no Wrap, sem erro (24/10/2026)
+- **Relato.** Mesma queda na RTX 5070 Laptop com a 0.7.0 (sem 60 fps); a GPU reinicia; com a Intel integrada não
+  acontece; algo parecido num recomp de outro jogo.
+- **Feito aqui (RTX 3080).** Batalha com Bellsprout só com Wrap: validação de núcleo, depois GPU-AV (shaders
+  instrumentados), e GPU-AV com `LARECOMP_NO_ROBUST=1` (acessos fora dos limites que a robustez esconde): nenhum erro.
+  Aponta para o driver ou a placa; pedidos ao autor: versão do driver e testes desligando o que só a NVIDIA usa
+  (`LARECOMP_WRITE_WATCH=0`, `LARECOMP_VK_NO_GMEM=1`, `LARECOMP_VERTEX_READ=copy`, `LARECOMP_ONE_QUEUE=1`).

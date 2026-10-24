@@ -136,6 +136,7 @@ começar com o turno do selvagem (normalmente só depois de uma bola que estouro
 | `LARECOMP_FPS_AT=<present>:<fps>,...` | muda o limite de quadros (30/60/120) naqueles presents, como o menu F12 |
 | `LARECOMP_SET_AT="<present>:<chave>=<valor>;..."` | aplica uma linha do `larecomp.ini` naquele present, como o menu F12 muda uma opção com o jogo rodando (ex.: `1300:ssao_level=3;1400:aa=taa`; sem espaços, para caber numa variável) |
 | `LARECOMP_MENU_PAGE=cfg/adv/<n>` | com `LARECOMP_MENU_AT`: abre as configurações do F12 (em vez do menu de pausa) na aba n - cfg a primeira (Gráficos), adv a Avançado |
+| `LARECOMP_UI2X_GENTLE=1` | o "Make the 2x images" começa pela tentativa leve do waifu2x (`-t 32 -j 1:1:1`), a que vem depois de uma saída recusada |
 | `LARECOMP_UI2X_GENERATE=1` | a tela inicial gera as imagens da interface em 2x (`runtime/ui2x.c`, como o botão) e sai: status 0 se terminou; o passo a passo vai para o log (`[ui2x]`) |
 | `LARECOMP_TEXKEY_LOG=1` | registra a chave de conteúdo de cada textura enviada da CPU (`[texkey] <chave de 64 bits> <w>x<h> nvn <formato> ...`: CRC-32 e Adler-32 do nível 0 desentrelaçado, `ui2x_key`, a mesma de `cache/ui2x.pak`). `tools/ui_texkeys.py <romfs.bin> <saída.tsv> [<log>]` calcula a mesma chave para todas as texturas da interface nos arquivos do jogo e diz quais do log batem |
 | `LARECOMP_FONT_SCALE=<1..4>` | força a escala do texto (`runtime/hle/font_hires.c`) em vez da automática pela altura da janela; `1` desliga (para comparar) |
