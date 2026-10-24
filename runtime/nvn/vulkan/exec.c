@@ -5470,6 +5470,7 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
     return post_process_ex(cb, b, ow_d, oh_d, NULL);
 }
 extern uint64_t fps60_period_ns(void);  // (runtime/hle/fps60.c: the game's frame time now)
+static bool flow_on(void);  // (frame generation by the optical flow: below)
 // res (may be NULL): the image behind the view returned (b when nothing was done)
 static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_d, double oh_d, TexBackend **res) {
     post_last_ow = ow_d, post_last_oh = oh_d;
@@ -5519,7 +5520,12 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
 #endif
     // The colour grade in the present's own draw (present.frag / present_gsr.frag) when nothing comes after it here:
     // one full-size pass (written to memory and read back) less. Every image reaching the window goes through the present.
-    bool grade_late = color && !sharpen && !fsr && !fsr3 && !deband;
+    // Not with the optical flow and nothing else here: it starts from N's processed image (flow_prepare), and without
+    // one there were no in-between images at all - Android, no anti-aliasing nor debanding: 30 fps with 4x on. The grade
+    // stays here then, an identity one too.
+    bool flow_src = flow_on() && !smaa && !sharpen && !fsr && !fsr3 && !deband;
+    if (flow_src) color = true;
+    bool grade_late = color && !sharpen && !fsr && !fsr3 && !deband && !flow_src;
     g_present_grade[0] = grade[0], g_present_grade[1] = grade[1], g_present_grade[2] = grade[2];
     g_present_grade[3] = grade_late ? 1.0f : 0.0f;
     if (grade_late) color = false;

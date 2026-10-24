@@ -31,6 +31,7 @@ void input_reset(void);
 uint64_t rt_addr(uint64_t eevee);  // runtime/fnhook.c (0: a build without the tables the frame rate modes need)
 bool input_finger_cursor(float *x, float *y, bool *down);  // runtime/hle/input.c
 uint64_t renderer_gpu_busy_ns(void);  // runtime/nvn/vulkan/exec.c (the performance overlay)
+uint64_t renderer_window_images(void);  // runtime/nvn/vulkan/device.c (... the images that reached the window)
 extern double g_present_rect[4];     // the game image in the window (runtime/hle/input.c)
 uint64_t plat_now_ns(void);
 uint64_t plat_process_cpu_ns(void);
@@ -603,23 +604,27 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
 
     if (g_settings.show_fps) {  // the performance overlay (F12 settings, advanced): frame rate | GPU use | CPU use
         // GPU: the share of the time the submissions ran (their timestamps, exec.c); CPU: this process's CPU time over
-        // all the cores (as a task manager shows it). Over half a second.
-        static uint64_t t0, gpu0, cpu0;
+        // all the cores (as a task manager shows it); the frame rate: the images that reached the window, frame generation's
+        // too (ImGui's own rate counts this overlay's frames: the optical flow draws a present's images at once - 68 shown
+        // for 120). Over half a second.
+        static uint64_t t0, gpu0, cpu0, img0;
         static int gpu_pct = -1, cpu_pct = -1;
+        static double fps = -1;
         uint64_t t = plat_now_ns();
         if (!t0 || t - t0 >= 500000000) {
-            uint64_t gpu = renderer_gpu_busy_ns(), cpu = plat_process_cpu_ns();
+            uint64_t gpu = renderer_gpu_busy_ns(), cpu = plat_process_cpu_ns(), img = renderer_window_images();
             int cores = SDL_GetNumLogicalCPUCores();
             if (t0 && t > t0) {
+                fps = 1e9 * (double)(img - img0) / (double)(t - t0);
                 gpu_pct = (int)lround(fmin(100.0, 100.0 * (double)(gpu - gpu0) / (double)(t - t0)));
                 cpu_pct = (int)lround(fmin(100.0, 100.0 * (double)(cpu - cpu0) / ((double)(t - t0) * (cores > 0 ? cores : 1))));
             }
-            t0 = t, gpu0 = gpu, cpu0 = cpu;
+            t0 = t, gpu0 = gpu, cpu0 = cpu, img0 = img;
         }
         // A box of a fixed size (dark: over the game, not the menus' look), each value centred in a cell as wide as its
         // widest text, so nothing moves as the numbers change. Under the menus (the background draw list).
         char txt[3][16];
-        snprintf(txt[0], sizeof txt[0], "%.0f FPS", io.Framerate);
+        snprintf(txt[0], sizeof txt[0], "%.0f FPS", fps >= 0 ? fps : io.Framerate);
         if (gpu_pct >= 0) snprintf(txt[1], sizeof txt[1], "GPU %d%%", gpu_pct);
         else snprintf(txt[1], sizeof txt[1], "GPU -");
         if (cpu_pct >= 0) snprintf(txt[2], sizeof txt[2], "CPU %d%%", cpu_pct);

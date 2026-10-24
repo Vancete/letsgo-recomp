@@ -710,6 +710,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path);
 static uint64_t frames, total_frames, g_frame_counter;
 static uint64_t g_window_images;  // (images presented: present_image)
 uint64_t renderer_present_count(void) { return total_frames; }
+uint64_t renderer_window_images(void) { return g_window_images; }  // (the performance overlay's frame rate)
 uint64_t vk_frame_counter(void) { return g_frame_counter; }
 static float g_shot_crop[4] = {0, 0, 1, 1};
 static double last_fps_time;
