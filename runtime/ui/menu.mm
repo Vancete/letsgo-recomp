@@ -271,7 +271,12 @@ void menu_apply_window_requests(void *win) {
     SDL_Window *w = (SDL_Window *)win;
     g_pixel_density = SDL_GetWindowPixelDensity(w);
     static bool text_input;
-    bool want_text = capturing();
+    // (typed text while the menu is up: a keyboard's, for its fields. Not where text input brings up a screen keyboard
+    // - Android: + and - opened the menu and the phone's keyboard with it; ImGui's backend asks for one while a field
+    // is being typed in)
+    static int screen_kbd = -1;
+    if (screen_kbd < 0) screen_kbd = SDL_HasScreenKeyboardSupport();
+    bool want_text = capturing() && !screen_kbd;
     if (want_text != text_input) {
         if (want_text) SDL_StartTextInput(w);
         else SDL_StopTextInput(w);

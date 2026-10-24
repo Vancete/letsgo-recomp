@@ -399,10 +399,31 @@ static void recreate_swapchain(void) {
 // sees the events whichever loop takes them (the start screen's, the game's).
 static _Atomic int g_background, g_surface_new;
 static void android_frame_rate(void);  // (below: the display's refresh for the frame generation)
+// The window losing the focus without going to the background (the system's overlays: the notification shade, a
+// game toolbox, a screen keyboard) left the game slow or frozen - its sound going on - until it went to the desktop
+// and back: the focus coming back makes the surface again too, as coming back does. Logged, with the window's other
+// changes, to see what the system did.
+static _Atomic int g_focus_lost;
 static bool SDLCALL lifecycle_watch(void *ud, SDL_Event *e) {
     (void)ud;
-    if (e->type == SDL_EVENT_WILL_ENTER_BACKGROUND) g_background = 1;
-    else if (e->type == SDL_EVENT_DID_ENTER_FOREGROUND) g_surface_new = 1, g_background = 0;
+    const char *what = NULL;
+    switch (e->type) {
+    case SDL_EVENT_WILL_ENTER_BACKGROUND: g_background = 1; what = "to the background"; break;
+    case SDL_EVENT_DID_ENTER_FOREGROUND: g_surface_new = 1, g_background = 0; what = "back to the foreground"; break;
+    case SDL_EVENT_WINDOW_FOCUS_LOST: g_focus_lost = 1; what = "focus lost"; break;
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+        what = "focus back";
+        if (g_focus_lost) g_focus_lost = 0, g_surface_new = 1;
+        break;
+    case SDL_EVENT_WINDOW_OCCLUDED: what = "occluded"; break;
+    case SDL_EVENT_WINDOW_EXPOSED: what = "exposed"; break;
+    case SDL_EVENT_WINDOW_HIDDEN: what = "hidden"; break;
+    case SDL_EVENT_WINDOW_SHOWN: what = "shown"; break;
+    case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED: what = "pixel size changed"; break;
+    case SDL_EVENT_WINDOW_SAFE_AREA_CHANGED: what = "safe area changed"; break;
+    default: break;
+    }
+    if (what) LOG("[android] window: %s\n", what);
     return true;
 }
 static void surface_again(void) {
@@ -493,6 +514,11 @@ bool vk_frame_begin(const float clear[4]) {
     static unsigned acquire_fails;  // (a window the driver keeps reporting out of date: logged once per 600, not every frame)
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
         if (acquire_fails++ % 600 == 0) LOG("[vk] acquire failed: %d (%u times)\n", r, acquire_fails);
+#ifdef __ANDROID__
+        // (no image for seconds - acquire_image gives up after ~4 s: the window stopped taking them; a new surface,
+        // as coming back from the desktop gives)
+        if (r == VK_NOT_READY || r == VK_TIMEOUT) g_surface_new = 1, LOG("[vk] no window image for seconds: surface made again\n");
+#endif
         return false;
     }
     acquire_fails = 0;
