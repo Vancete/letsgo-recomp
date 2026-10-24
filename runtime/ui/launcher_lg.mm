@@ -239,7 +239,9 @@ static void game_files_section(SDL_Window *win) {
                                            "Escolha a pasta com a própria pasta romfs (não um romfs.bin de outra ferramenta); detalhes no lasrecomp.log."};
         int k = st - SETUP_FAIL_NOT_FOUND;
         ImGui::TextColored(k_red, "%s", T(en[k], pt[k]));
+        ImGui::PushTextWrapPos(0);  // (the longer hints wrap instead of running past the page)
         ImGui::TextDisabled("%s", T(en_h[k], pt_h[k]));
+        ImGui::PopTextWrapPos();
     } else {
         ImGui::PushTextWrapPos(0);
         ImGui::TextUnformatted(T("Select the folder with your own extracted Pokémon: Let's Go, Eevee! or Pikachu! (exefs and romfs).",
