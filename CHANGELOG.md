@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.7.2 (2026-10-24)
+
+Iván Serrano's ([@Vancete](https://github.com/Vancete), PRs #25 and #23): up to twice the frame rate when the CPU is
+the limit, cheaper SSAO and GI, the effects tuned by hand, and an optical flow frame generation.
 
 - **Optical flow: block matching ~10x cheaper** - each block's samples of frame N are read once for all the candidates
   instead of once per candidate (the same result). Adreno 830: matching 3.66 -> 0.25 ms, refining 1.69 -> 0.14 ms a frame.
@@ -62,6 +65,10 @@
   1.21, low 1.61 -> 0.97; contact shadows 0.54 -> 0.53.
 - **Title screen: no contact shadows** (SSAO Ultra): on its close-up of Pikachu they drew the shadows of its own arms
   onto its chest as jagged dark triangles. They are made for the world's scale (feet, grass, small props).
+
+- **Fix: "Make the 2x images" failed on an AMD integrated GPU** (issue #30): most of the upscaled images came back
+  wrong while the GPU couldn't keep up. A refused or failed upscale is now tried once more, much lighter (small tiles,
+  one thread each).
 
 ## 0.7.1 (2026-10-24)
 
