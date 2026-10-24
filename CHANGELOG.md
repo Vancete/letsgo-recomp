@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Optical flow: block matching ~10x cheaper** - each block's samples of frame N are read once for all the candidates
+  instead of once per candidate (the same result). Adreno 830: matching 3.66 -> 0.25 ms, refining 1.69 -> 0.14 ms a frame.
+
 - **Frame generation: a second method, optical flow** (F12 menu, advanced tab: "Frame generation method", with frame
   generation on; `fg_method = rerender | flow` in larecomp.ini, switched live). Re-rendering (the default)
   draws the frame again for each in-between image; the optical flow makes them from the last two frames as they are
