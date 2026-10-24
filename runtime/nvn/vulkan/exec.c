@@ -1274,6 +1274,7 @@ uint64_t renderer_present_count(void);
 void renderer_save_texture_tex(TexBackend *b, const char *path);
 static float pass_sx = 1, pass_sy = 1;
 static float vp_sx = 1, vp_sy = 1, vp_ox = 0, vp_oy = 0;
+static int g_wide_ui;  // wide screens: this draw's interface placement (ShaderKey.widen's wide_.y)
 static float tex_sc[2][64][2];
 static uint32_t tex_wh[2][64][2];
 
@@ -1550,6 +1551,11 @@ static VkRect2D scissor_rect(void) {
     pass_size(&w, &h);
     if (!w) return (VkRect2D){{0, 0}, {pass_w, pass_h}};
     int x = st.scissor[0][0], y = st.scissor[0][1], sw = st.scissor[0][2], sh = st.scissor[0][3];
+    // (wide screens, the interface placed by its vertex shader: a scissor over the whole screen is the whole image's -
+    // what reaches the window's sides is drawn there; a smaller one, the box's)
+    if (g_wide_ui && st.rt.ncolor && st.rt.color[0] && x <= 0 && y <= 0 && (int64_t)x + sw >= (int64_t)st.rt.color[0]->width &&
+        (int64_t)y + sh >= (int64_t)st.rt.color[0]->height)
+        return (VkRect2D){{0, 0}, {(uint32_t)(w < (int)pass_w ? w : (int)pass_w), (uint32_t)(h < (int)pass_h ? h : (int)pass_h)}};
     if (vp_sx != 1 || vp_sy != 1 || vp_ox != 0 || vp_oy != 0) {
         double x0 = floor(x * (double)vp_sx + vp_ox), y0 = floor(y * (double)vp_sy + vp_oy);
         double x1 = ceil(((double)x + sw) * vp_sx + vp_ox), y1 = ceil(((double)y + sh) * vp_sy + vp_oy);
@@ -3415,7 +3421,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             bi[n] = ubo_span(vk_transient_copy(taa_jitter(), 16, 256), 16);
         } else if (b->binding == 21) {  // (wide screens: ShaderKey.widen's scale)
             extern float widescreen_aspect(void);
-            float wa = widescreen_aspect(), wv[4] = {wa > 1.0f ? (16.0f / 9.0f) / wa : 1.0f, 0, 0, 0};
+            float wa = widescreen_aspect(), wv[4] = {wa > 1.0f ? (16.0f / 9.0f) / wa : 1.0f, (float)g_wide_ui, 0, 0};
             bi[n] = ubo_span(vk_transient_copy(wv, 16, 256), 16);
         } else if (b->binding == 18) {
             for (int t = 0; t < si->ntex && t < 64; t++) { rs[1 + t][0] = tex_sc[sg][t][0]; rs[1 + t][1] = tex_sc[sg][t][1]; }
@@ -3926,7 +3932,7 @@ static void draw_(CmdRec *r, bool indexed) {
         extern float widescreen_aspect(void);
         TexBackend *c0 = st.rt.ncolor && st.rt.color[0] ? st.rt.color[0]->backend : NULL;
         TexBackend *d0 = st.rt.depth ? st.rt.depth->backend : NULL;
-        vkey.widen = widescreen_aspect() > 1.0f && ((c0 && c0->scalable) || (d0 && d0->scalable));
+        vkey.widen = widescreen_aspect() > 1.0f && ((c0 && (c0->scalable || c0->presented)) || (d0 && d0->scalable));
     }
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
     vkey.depth_minus_one = nvn_depth_mode() == 0;
@@ -4150,12 +4156,11 @@ static void draw_(CmdRec *r, bool indexed) {
     float zn = st.depth_range[0][0], zf = st.depth_range[0][1];
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     float tint[8] = {0};  // (the per-draw tint the translator can apply to colour target 0: none)
-    // fragment textures are bound before deciding the viewport (tex_sc / tex_wh), rscale depends on the decision:
-    // build the vertex set now and the fragment set after the decision (stage_set fills tex_sc for stage 1).
+    // fragment textures are bound before deciding the viewport (tex_sc / tex_wh), rscale and the wide screens'
+    // interface placement depend on the decision: both sets after it (stage_set fills tex_sc for stage 1).
     if (prof) prof_dyn += SDL_GetTicksNS() - prof_td_;
-    PROF_T0();
-    VkDescriptorSet vset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL);
-    PROF_ADD(prof_sets);
+    g_wide_ui = 0;
+    bool wide_vp = false;  // (the interface placed by its vertex shader: the viewport the whole image's)
     VkDescriptorImageInfo fii[64];
     uint64_t prof_tx_ = prof ? SDL_GetTicksNS() : 0;
     for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
@@ -4200,6 +4205,18 @@ static void draw_(CmdRec *r, bool indexed) {
             vp_sx = vp_sy = u;
             vp_ox = (pw - st.rt.color[0]->width * u) * 0.5f;
             vp_oy = (ph - st.rt.color[0]->height * u) * 0.5f;
+            // wide screens, a draw over the whole screen (its viewport): placed by its vertex shader instead
+            // (ShaderKey.widen) - in the box but for what touches the screen's sides; a background (a 16:9 image of
+            // 480 or more, in one piece or several) covers the window. The box stays a smaller scissor's.
+            bool full_vp = st.viewport[0][0] == 0 && st.viewport[0][1] == 0 && st.viewport[0][2] >= st.rt.color[0]->width &&
+                           st.viewport[0][3] >= st.rt.color[0]->height;
+            if (widescreen_aspect() > 1.0f && full_vp) {
+                NvnTexture *t0 = pr->fi->ntex >= 1 ? shader_texture_object(1, &pr->fi->tex[0]) : NULL;
+                bool img = t0 && t0->backend && !((TexBackend *)t0->backend)->scalable && tex_wh[1][0][0] >= 480 &&
+                           fabsf((float)tex_wh[1][0][0] / (float)tex_wh[1][0][1] - 16.0f / 9.0f) < 0.05f;  // (not the scene's)
+                g_wide_ui = img ? 2 : 1;
+                wide_vp = true;
+            }
         }
     }
     {   // (research, LARECOMP_COUNT_FS=<fs hash>: draws with that fragment shader per frame, logged when the count changes)
@@ -4217,13 +4234,14 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     {
         float vx = vp[0] * vp_sx + vp_ox, vw = vp[2] * vp_sx;
-        set_viewport(vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, zn, zf);
+        if (wide_vp) set_viewport(vp[0] * pass_sx, vp[1] * pass_sy, vp[2] * pass_sx, vp[3] * pass_sy, zn, zf);
+        else set_viewport(vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, zn, zf);
         if (g_debug_frame) {
             VkRect2D sr = scissor_rect();
-            LOG("[draw]   vp %.2f %.2f %.2f %.2f (fs hash %016llx) scissor %d %d %u %u | guest sc %d %d %d %d | pass %ux%u s %.4f %.4f\n",
+            LOG("[draw]   vp %.2f %.2f %.2f %.2f (fs hash %016llx) scissor %d %d %u %u | guest sc %d %d %d %d | pass %ux%u s %.4f %.4f wide %d%s\n",
                 vx, vp[1] * vp_sy + vp_oy, vw, vp[3] * vp_sy, (unsigned long long)g_cur_fs_hash, sr.offset.x, sr.offset.y,
                 sr.extent.width, sr.extent.height, st.scissor[0][0], st.scissor[0][1], st.scissor[0][2], st.scissor[0][3], pass_w, pass_h,
-                vp_sx, vp_sy);
+                vp_sx, vp_sy, g_wide_ui, wide_vp ? " (full viewport)" : "");
         }
     }
     apply_scissor();
@@ -4233,7 +4251,9 @@ static void draw_(CmdRec *r, bool indexed) {
     gpuw_stores(pr->fi, st.sbuf[1], 16, "fragment shader", st.program->stages[1].code_addr);
     gpur_loads(pr->vi, st.sbuf[0], 16);
     gpur_loads(pr->fi, st.sbuf[1], 16);
+    VkDescriptorSet vset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL);
     VkDescriptorSet fset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, tint, 0, 0, 0, fii);
+    g_wide_ui = 0;  // (this draw's: written; the next scissor - a clear's - is the box's again)
     if (prof) prof_sets += SDL_GetTicksNS() - prof_t1_;
     VkDescriptorSet sets[2] = {vset, fset};
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, 2, sets, 0, NULL);

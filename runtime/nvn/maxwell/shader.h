@@ -56,7 +56,9 @@ typedef struct {
     uint8_t jitter;
     // vertex: wide screens (runtime/hle/widescreen.c) - clip x of a perspective position (w != 1) scaled by wide_.x, from a
     // uniform at binding 21, before the jitter; the velocity's two positions too. The game's 16:9 projections, whichever
-    // matrix carries them (a character's is one the game multiplied itself), at the window's aspect.
+    // matrix carries them (a character's is one the game multiplied itself), at the window's aspect. The interface's
+    // draws by wide_.y instead: 1 into the centred 16:9 box except what is on the screen's left / right edge (bars and
+    // veils reach the window's), 2 cover (a background filling the window, cropped above and below).
     uint8_t widen;
 } ShaderKey;
 

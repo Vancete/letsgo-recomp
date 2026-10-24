@@ -2091,7 +2091,13 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg, char *flags) {
     free(body.buf);
     if (stage == STAGE_VERTEX) {
         if (key && key->widen && !dbg) {
-            sp(&s, "  if (gl_Position.w != 1.0f) gl_Position.x *= wide_.x;\n");
+            // (the interface, wide_.y: 1 - into the centred box, but what touches the screen's left or right edge stays
+            // at the window's (its positions have w != 1 too: x against w); 2 - a background, the screen's width the
+            // window's and its height grown as much, cropped: cover - every vertex alike, a background in pieces too)
+            sp(&s, "  if (wide_.y > 1.5f) gl_Position.y /= wide_.x;\n"
+                   "  else if (wide_.y > 0.5f) {\n"
+                   "    if (abs(gl_Position.x) < 0.999f * abs(gl_Position.w)) gl_Position.x *= wide_.x;\n"
+                   "  } else if (gl_Position.w != 1.0f) gl_Position.x *= wide_.x;\n");
             if (vel_vs) sp(&s, "  if (mv_cur_.w != 1.0f) mv_cur_.x *= wide_.x;\n  if (mv_prev_.w != 1.0f) mv_prev_.x *= wide_.x;\n");
         }
         if (key && key->jitter && !dbg) sp(&s, "  gl_Position.xy += jit.xy * gl_Position.w;\n");
