@@ -40,6 +40,12 @@
 - **Title screen: no contact shadows** (SSAO Ultra): on its close-up of Pikachu they drew the shadows of its own arms
   onto its chest as jagged dark triangles. They are made for the world's scale (feet, grass, small props).
 
+## 0.7.1 (2026-10-24)
+
+- **Fix: updating to 0.7.0 asked for the game folder again.** 0.7.0's game code carries the CPU level it was built for,
+  so the library an earlier version built no longer matched, and the start screen showed the first setup instead of
+  rebuilding it. With the game files already set up, it now rebuilds the game code by itself (a few minutes, once).
+
 ## 0.7.0 (2026-10-24)
 
 Iván Serrano's ([@Vancete](https://github.com/Vancete), PR #26): CPUs without AVX2.
