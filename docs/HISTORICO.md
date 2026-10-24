@@ -666,3 +666,26 @@ Pedido: capturar a qualquer momento da batalha, mais fácil com o selvagem fraco
 - **Correção.** Slot de comparação sem textura de profundidade recebe uma imagem de profundidade 1x1 em 1,0
   (`vk_dummy_depth_view`): tudo iluminado, como contra a textura branca. Validação limpa em batalha com Wrap (3 usos);
   imagens iguais. Se era a causa do travamento da 5070 só o autor da issue pode confirmar.
+
+## 0.7.0: atualizar por cima pedia a pasta do jogo de novo (24/10/2026, corrigido na 0.7.1)
+- **Sintoma.** Com a 0.7.0 descompactada sobre uma pasta da 0.6.0, o launcher mostrava a configuração inicial
+  ("Selecione a pasta do jogo extraído"), não a recompilação.
+- **Causa.** O PR #26 pôs o nível da CPU no id da biblioteca (`<id>-v3` / `-v2`); a da 0.6.0 (`<id>` sem sufixo) deixou
+  de servir, `setup_ready()` ficou falso e nada chamava `setup_start(NULL)` (só o código do jogo, já previsto em
+  `gamesetup.c`). Nas versões anteriores o id não tinha mudado, então o caso nunca apareceu.
+- **Como passou.** O teste da release nas pastas `D:\teste-0.7.0` não chegou a rodar a 0.7.0: os `lasrecomp.log` e as
+  DLLs delas ainda eram as cópias da 0.6.0; não conferi isso antes de publicar. Minha tentativa automática com
+  `LARECOMP_LAUNCHER_AUTOPLAY` ficou parada no launcher (ele só joga quando já está pronto).
+- **Correção (0.7.1).** `setup_needs_build()` (arquivos do jogo instalados, biblioteca de outra versão) e o launcher
+  chama `setup_start(NULL)` sozinho, uma vez. Testado numa cópia da pasta da 0.6.0 com a 0.7.1 por cima: recompilou
+  sozinho (id `...-v3`) e o jogo rodou até a gameplay.
+- **Lição.** Antes de publicar, conferir nas pastas de teste o log e a DLL da versão nova (data e id), não só a
+  resposta do teste; e testar o caminho de quem atualiza (pasta da versão anterior com a nova por cima).
+
+## Pisca-pisca das árvores em batalha com TAA (24/10/2026, não é regressão)
+- **Relato (usuário, testando a 0.7.1).** A vegetação pisca nas batalhas.
+- **Medida.** Quadros seguidos de uma batalha fixa, pixels da parte de cima que sobem e descem (±24) em três quadros:
+  TAA 1,1 %, SMAA 0,05 %; SSAO Ultra pouco muda (0,9 % sem). 0.6.0 e 0.7.1 com a batalha parada: iguais (0,44–0,78 %
+  contra 0,33–1,09 %). Uma primeira comparação parecia mostrar piora, mas o runtime da 0.6.0 ignorava as entradas
+  `b<N>` do roteiro (a batalha ficava parada) - comparar só com roteiros que as duas versões entendem.
+- **Pendente.** O TAA nas folhas recortadas das árvores em batalha (com ação); SMAA não tem.
