@@ -641,11 +641,10 @@ extern "C" void launcher_lg_run(const char *root) {
                 float ox = ui_label_x(ol, 3);
                 ImGui::BeginDisabled(!known);
                 ui_toggle("##wild", ol[0], ox, &wildb);
-                // (only with another Pokémon walking along: without it the battle broke, issue #6, runtime/hle/wildbattle.c)
-                ui_tip(!known ? only : T("Touching a wild Pokémon starts a classic battle, then the capture, instead of going straight to the capture. "
-                                         "Only while another Pokémon from your party walks with you (not your starter): otherwise it is the usual capture.",
-                                         "Encostar num Pokémon selvagem começa uma batalha clássica e, depois, a captura, em vez de ir direto para a captura. "
-                                         "Só com outro Pokémon da equipe andando com você (não o inicial): sem ele, é a captura de sempre."));
+                ui_tip(!known ? only : T("Touching a wild Pokémon starts a classic battle instead of going straight to the capture. "
+                                         "Its CATCH button throws one Poké Ball, with better odds the weaker the Pokémon is.",
+                                         "Encostar num Pokémon selvagem começa uma batalha clássica em vez de ir direto para a captura. "
+                                         "O botão de captura (CATCH) joga uma Poké Bola, com mais chance quanto mais fraco o Pokémon estiver."));
                 ui_toggle("##skipc", ol[1], ox, &skipc);
                 ui_tip(!known ? only : T("The game starts at the Game Freak logo, with your controller already chosen, instead of asking for a button press first.",
                                          "O jogo começa no logo da Game Freak, com o seu controle já escolhido, em vez de pedir antes que se aperte um botão."));

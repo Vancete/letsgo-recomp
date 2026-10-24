@@ -2,10 +2,24 @@
 
 ## Unreleased
 
-- **Wild battles: the launcher says when they happen** (issue #22): only while another Pokémon from the party walks with
-  the player, not the starter; otherwise it is the game's capture (since 0.4.2: without that Pokémon the battle broke,
-  issue #6). The option's tip said nothing of it, and with Pikachu on the shoulder and no one walking along it looked
-  like it did nothing.
+- **Wild battles: catch during the battle, with a CATCH button.** The battle menu gets a fifth button, CATCH, next to RUN,
+  drawn in the game's style in its nine languages (built at start from the player's own game files; trainer and
+  two-player battles keep their four buttons). It throws one Poké Ball through the game's own capture scene, and the
+  catch rate grows as the wild Pokémon weakens: up to x3 nearly fainted, x2.5 asleep or frozen, x1.5 paralysed, burnt
+  or poisoned; the ring's colour follows it. If the Pokémon breaks free, or you choose "Back to battle" (the capture's
+  Run away, renamed), the battle comes back (no question, a short dark screen, then your Pokémon already out) with the HP and status it
+  had - and after a ball that broke, the wild Pokémon moves first: the throw was your turn; if it
+  faints, it is lost, but the party gets its Exp. Points (the game's own: levels, new moves, and evolutions after the battle). The wild battles
+  no longer have the legendaries' 5-minute clock, and CATCH works even when a move like Wrap holds your Pokémon. Tested
+  on Eevee and Pikachu.
+- **Wild battles also with only the starter walking along** (issues #6 and #22): since 0.4.2 they needed another
+  Pokémon from the party walking with the player (without it the battle broke), and otherwise the touch went to the
+  usual capture - with Pikachu on the shoulder and no one walking along, the option looked like it did nothing. Now the
+  starter is sent out from a Poké Ball with its species' battle model. Tested with Eevee walking alone, on Eevee and
+  Pikachu.
+- **Wild battles: a knocked out wild Pokémon faints** ("Rattata fainted!", it falls and is called back) before the Exp.
+  Points, instead of the battle just ending. And going to the capture and back no longer leaves the field's music
+  playing over the battle's: the battle's music goes on through the capture and the battle again.
 
 ## 0.6.0 (2026-10-22)
 
