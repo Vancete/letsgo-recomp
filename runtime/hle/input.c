@@ -115,6 +115,7 @@ static void mouse_release(void) {
 // 1280 x 720: in those, the berry button sat 2/3 of the way to where it was drawn and never opened.
 // g_present_rect: where the image is drawn in the window, in pixels (runtime/nvn/vulkan/device.c).
 double g_present_rect[4] = {0, 0, 1280, 720};
+double g_image_rect[4] = {0, 0, 1280, 720};  // (the whole image: with ultrawide, the window's, wider than the box above)
 static double touch_w(void) {
     static double w = 0;
     if (!w) w = getenv("LARECOMP_DISPLAY_W") ? atoi(getenv("LARECOMP_DISPLAY_W")) : 1920;

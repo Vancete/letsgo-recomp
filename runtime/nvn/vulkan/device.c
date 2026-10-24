@@ -754,9 +754,10 @@ static void present_image(TexBackend *b, bool final, int image, int nimg, uint64
         float crop[4] = {0, 0, 1, 1};  // uv origin and size: the whole image
         {   // where the game image is in the window (pixels): the mouse as a finger on the touch screen (hle/input.c) -
             // reshaped, the interface's centred 16:9 box
-            extern double g_present_rect[4];
+            extern double g_present_rect[4], g_image_rect[4];
             double bw = wide && os.shape > 1 ? vw / os.shape : vw, bh = wide && os.shape < 1 ? vh * os.shape : vh;
             g_present_rect[0] = vx + (vw - bw) / 2, g_present_rect[1] = vy + (vh - bh) / 2, g_present_rect[2] = bw, g_present_rect[3] = bh;
+            g_image_rect[0] = vx, g_image_rect[1] = vy, g_image_rect[2] = vw, g_image_rect[3] = vh;  // (the whole image)
         }
         renderer_set_scale((float)sx, (float)sy);
         VkCommandBuffer cb = vk_cmd();

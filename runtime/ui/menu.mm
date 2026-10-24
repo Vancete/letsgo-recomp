@@ -33,6 +33,7 @@ bool input_finger_cursor(float *x, float *y, bool *down);  // runtime/hle/input.
 uint64_t renderer_gpu_busy_ns(void);  // runtime/nvn/vulkan/exec.c (the performance overlay)
 uint64_t renderer_window_images(void);  // runtime/nvn/vulkan/device.c (... the images that reached the window)
 extern double g_present_rect[4];     // the game image in the window (runtime/hle/input.c)
+extern double g_image_rect[4];       // ... all of it (ultrawide: the interface's 16:9 box is g_present_rect)
 uint64_t plat_now_ns(void);
 uint64_t plat_process_cpu_ns(void);
 }
@@ -634,8 +635,9 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         float fs = floorf(34 * 1.15f * scale), gap = floorf(0.8f * fs), pad_x = floorf(0.6f * fs), pad_y = floorf(0.3f * fs);
         float cw[3], pipe = font->CalcTextSizeA(fs, FLT_MAX, 0, "|").x, w = 2 * pad_x + 2 * (pipe + 2 * gap), h = fs + 2 * pad_y;
         for (int i = 0; i < 3; i++) w += cw[i] = ceilf(font->CalcTextSizeA(fs, FLT_MAX, 0, widest[i]).x);
-        // (in the game image's corner: a screen wider than 16:9 has black bars at its sides)
-        float x = floorf((float)(g_present_rect[0] + g_present_rect[2]) - 16 * scale - w), y = floorf((float)g_present_rect[1] + 16 * scale);
+        // (in the game image's corner: a screen wider than 16:9 has black bars at its sides - or, ultrawide, the image
+        // reaching the window's)
+        float x = floorf((float)(g_image_rect[0] + g_image_rect[2]) - 16 * scale - w), y = floorf((float)g_image_rect[1] + 16 * scale);
         ImDrawList *dl = ImGui::GetBackgroundDrawList();
         dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), IM_COL32(0, 0, 0, 64), 10 * scale);
         x += pad_x;

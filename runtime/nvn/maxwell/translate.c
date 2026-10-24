@@ -2523,7 +2523,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     uint32_t meta[8] = {(uint32_t)stage, (uint32_t)len, key->vs_out_mask, (uint32_t)(getenv("LARECOMP_NO_DISCARD") != NULL),
                         (uint32_t)(getenv("LARECOMP_VK_EXACT_H2F") && atoi(getenv("LARECOMP_VK_EXACT_H2F")) != 0),
                         (uint32_t)maxwell_gmem_chunk_shift, (uint32_t)straight_on()};  // (Android: page table, straight code)
-    uint8_t kb[48] = {key->depth_minus_one, key->flip_y, key->glsl, key->velocity, key->vel_vs, key->vel_rt, key->jitter};
+    uint8_t kb[48] = {key->depth_minus_one, key->flip_y, key->glsl, key->velocity, key->vel_vs, key->vel_rt, key->jitter, key->widen};
     memcpy(kb + 8, key->attr_kind, 32);
     memcpy(kb + 40, key->rt_kind, 8);
     uint64_t heap[2] = {maxwell_gmem_base, maxwell_gmem_size};
