@@ -24,7 +24,8 @@ _Atualizado em 17/10/2026._
 | Personagens e Pokémon | modelos com esqueleto corretos, com animação (correção do `LDC.64` no tradutor de shaders) |
 | Gameplay | andar, encontro com o Professor, captura do Pikachu (mira centralizada) |
 | Save | salvar e carregar funcionam (`save/save_0/savedata.bin`) |
-| Batalhas selvagens (experimental, opção no launcher, desligada por padrão; `wild_battle = 1`) | encostar num Pokémon selvagem abre uma batalha clássica contra ele (espécie, nível, gênero, IVs e golpes por nível reais) e, depois, a captura; o mundo volta com fade in. Testado por roteiro e jogado por uma pessoa na Rota 1; falta XP dividido, natureza/shiny e mais áreas (HISTORICO, [MODO-BATALHA.md](MODO-BATALHA.md)) |
+| Batalhas selvagens (experimental, opção no launcher, desligada por padrão; `wild_battle = 1`) | encostar num Pokémon selvagem abre uma batalha clássica contra ele (espécie, nível, gênero, IVs e golpes por nível reais) e, depois, a captura; o mundo volta com fade in. Desde 23/10/2026, o 5º botão CATCH (nativo, 9 idiomas): captura a qualquer momento, chance maior com o selvagem fraco ou com status, uma bola por vez (escapou → a batalha volta com a mesma vida), desmaiou = perdido, mas o time ganha a XP nativa (e evolui depois da batalha); sem o relógio de 5 minutos; também com o inicial andando sozinho; o selvagem derrotado desmaia; a música da batalha segue pela captura e pela volta (24/10/2026); "Back to battle" na captura e volta sem a
+abertura nem arremesso; testado por roteiro no Eevee e no Pikachu. Falta a abertura da captura, natureza/shiny, a espera de ~12 s ao sair da batalha e mais áreas (HISTORICO, [MODO-BATALHA.md](MODO-BATALHA.md), etapa 6) |
 
 ## O que falta
 1. **Validar o 3D em mais cenas** (batalhas, Pokémon grandes, cidades): a correção dos modelos com esqueleto foi

@@ -22,6 +22,103 @@ SI T FN(flush)(T x) { U u = FN(fb)(x); return FN(isden)(u) ? FN(fv)(u & SGN) : x
 SI T FN(fz)(Cpu *c, T x) { return __builtin_expect(c->fpcr & FPCR_FZ, 0) ? FN(flush)(x) : x; }
 SI T FN(neg)(T x) { return FN(fv)(FN(fb)(x) ^ SGN); }
 
+// Fused multiply-add x*y + z, one rounding in the host's current mode. With FMA (x86-64-v3, AArch64) the host
+// instruction. Without it (x86-64-v2):
+// - single precision in double: x*y is exact there, x*y + z is rounded to odd (rounded in the current mode, error by
+//   Fast2Sum, which is exact in every rounding mode, then the last bit set from the side the error is on) and that rounds
+//   to float exactly as the fused result would (53 >= 24 + 2 bits). Exact sums never underflow in double (operands are
+//   multiples of 2^-298).
+// - double precision in integers: the 106-bit product and the addend aligned in 128 bits (bits shifted out kept as a
+//   sticky bit), rounded in the MXCSR mode. (Not the C library's fma: zig 0.17's returns NaN for some operands.)
+#if defined(__FMA__) || defined(__aarch64__)
+#define FFMA(x, y, z) __builtin_elementwise_fma(x, y, z)
+#elif NB == 64
+SI int simd_clz128(u128 v) {
+    uint64_t hi = (uint64_t)(v >> 64);
+    return hi ? __builtin_clzll(hi) : 64 + __builtin_clzll((uint64_t)v);
+}
+SI u128 simd_shr_sticky(u128 v, int n) {
+    if (n <= 0) return v;
+    if (n >= 128) return v != 0;
+    return (v >> n) | ((v & (((u128)1 << n) - 1)) != 0);
+}
+SN T FN(sfma)(T x, T y, T z) {
+    if (!__builtin_isfinite(x) || !__builtin_isfinite(y) || x == 0 || y == 0) return x * y + z;  // (the product is exact)
+    if (!__builtin_isfinite(z)) return z + z;
+    if (z == 0) return x * y;  // (a product rounded to zero keeps its sign, as the fused op's result would)
+    U ux = FN(fb)(x), uy = FN(fb)(y), uz = FN(fb)(z);
+    int sp = (int)((ux ^ uy) >> 63), sz = (int)(uz >> 63);
+    int ex = (int)((ux >> MB) & 0x7ff), ey = (int)((uy >> MB) & 0x7ff), ez = (int)((uz >> MB) & 0x7ff);
+    U fx = ux & (((U)1 << MB) - 1), fy = uy & (((U)1 << MB) - 1), fz = uz & (((U)1 << MB) - 1);
+    if (ex) fx |= (U)1 << MB; else ex = 1;  // value = significand * 2^(e - 1075)
+    if (ey) fy |= (U)1 << MB; else ey = 1;
+    if (ez) fz |= (U)1 << MB; else ez = 1;
+    u128 p = (u128)fx * fy, q = fz;
+    int ep = ex + ey - 2150, eq = ez - 1075;  // exponents of the last bits
+    int k = simd_clz128(p) - 2;  // both with their top bit at bit 125
+    p <<= k, ep -= k;
+    k = simd_clz128(q) - 2;
+    q <<= k, eq -= k;
+    if (ep >= eq) q = simd_shr_sticky(q, ep - eq);  // (a shift of 2 or more cancels at most a bit below: the
+    else p = simd_shr_sticky(p, eq - ep), ep = eq;   // sticky bit stays far below the rounding point)
+    u128 r;
+    int s;
+    if (sp == sz) r = p + q, s = sp;
+    else if (p >= q) r = p - q, s = sp;
+    else r = q - p, s = sz;
+    int mode = (int)((__builtin_ia32_stmxcsr() >> 13) & 3);  // 0 nearest, 1 down, 2 up, 3 toward zero
+    if (r == 0) return mode == 1 ? -K(0) : K(0);
+    int m = 127 - simd_clz128(r), sh = m - MB;  // keep 53 bits; fewer below the normal range
+    if (ep + m < -1022) sh = -1074 - ep;
+    U kept;
+    if (sh <= 0) {
+        kept = (U)(r << -sh);
+    } else {
+        u128 rem = sh >= 128 ? r : r & (((u128)1 << sh) - 1), half = sh > 128 ? 0 : (u128)1 << (sh - 1);
+        kept = sh >= 128 ? 0 : (U)(r >> sh);
+        int up = mode == 0 ? (sh <= 128 && (rem > half || (rem == half && (kept & 1)))) : mode == 1 ? s : mode == 2 ? !s : 0;
+        kept += rem != 0 && up;
+    }
+    int el = ep + sh;  // the exponent of kept's last bit: -1074 for a subnormal, whose encoding is kept itself
+    U bits = el + 1074 > 2046 ? EXPM : ((U)(el + 1074) << MB) + kept;  // (a carry into the exponent field is right)
+    if (bits >= EXPM) bits = mode == 0 || (mode == 1 && s) || (mode == 2 && !s) ? EXPM : EXPM - 1;
+    return FN(fv)(bits | (U)s << 63);
+}
+SI VT FN(vsfma)(VT x, VT y, VT z) { return (VT){FN(sfma)(x[0], y[0], z[0]), FN(sfma)(x[1], y[1], z[1])}; }
+#define FFMA(x, y, z) _Generic((x), T: FN(sfma), VT: FN(vsfma))(x, y, z)
+#else
+typedef double simd_vd4 __attribute__((vector_size(32)));
+typedef uint64_t simd_vu4 __attribute__((vector_size(32)));
+typedef int64_t simd_vs4 __attribute__((vector_size(32)));
+SI T FN(sfma)(T x, T y, T z) {
+    double p = (double)x * y, q = z, s = p + q;
+    int big = __builtin_fabs(p) >= __builtin_fabs(q);
+    double e = (big ? q : p) - (s - (big ? p : q));
+    uint64_t u;
+    memcpy(&u, &s, sizeof u);
+    if (e != 0 && !(u & 1) && __builtin_fabs(s) < __builtin_inf()) {
+        uint64_t ue;
+        memcpy(&ue, &e, sizeof ue);
+        u += ((u ^ ue) >> 63) ? (uint64_t)-1 : 1;  // one ulp toward the error (sign-magnitude bits)
+        memcpy(&s, &u, sizeof s);
+    }
+    return (T)s;
+}
+SI VT FN(vsfma)(VT x, VT y, VT z) {
+    simd_vd4 p = CVT(x, simd_vd4) * CVT(y, simd_vd4), q = CVT(z, simd_vd4), s = p + q;
+    simd_vu4 big = (simd_vu4)(__builtin_elementwise_abs(p) >= __builtin_elementwise_abs(q));
+    simd_vd4 hi = (simd_vd4)(((simd_vu4)p & big) | ((simd_vu4)q & ~big));
+    simd_vd4 lo = (simd_vd4)(((simd_vu4)q & big) | ((simd_vu4)p & ~big));
+    simd_vd4 e = lo - (s - hi);
+    simd_vu4 u = (simd_vu4)s;
+    simd_vu4 odd = (simd_vu4)((e != 0) & ((u & 1) == 0) & (__builtin_elementwise_abs(s) < __builtin_inf()));
+    simd_vu4 toward = (simd_vu4)((simd_vs4)(u ^ (simd_vu4)e) >> 63);  // 0: away from zero, all ones: toward it
+    u += odd & (toward + toward + 1);
+    return CVT((simd_vd4)u, VT);
+}
+#define FFMA(x, y, z) _Generic((x), T: FN(sfma), VT: FN(vsfma))(x, y, z)
+#endif
+
 // FPProcessNaN(s): first signalling NaN (quietened), else first quiet NaN, else (invalid op) default NaN
 SN T FN(nan1)(Cpu *c, T a) {
     U x = FN(fb)(a);
@@ -58,9 +155,9 @@ SN T FN(nan3)(Cpu *c, T a, T b, T d) {
    : (op) == FOP_MUL || (op) == FOP_MULX ? (a) * (b) : (op) == FOP_NMUL ? -((a) * (b))              \
    : (op) == FOP_DIV ? (a) / (b) : (op) == FOP_ABD ? __builtin_elementwise_abs((a) - (b))          \
    : (op) == FOP_SQRT ? __builtin_elementwise_sqrt(a)                                              \
-   : (op) == FOP_MADD ? __builtin_elementwise_fma(b, d, a)                                         \
-   : (op) == FOP_RECPS ? __builtin_elementwise_fma(a, b, KK(2))                                    \
-   : (op) == FOP_RSQRTS ? __builtin_elementwise_fma(a, b, KK(3)) * KK(0.5) : (a))
+   : (op) == FOP_MADD ? FFMA(b, d, a)                                                              \
+   : (op) == FOP_RECPS ? FFMA(a, b, KK(2))                                                         \
+   : (op) == FOP_RSQRTS ? FFMA(a, b, KK(3)) * KK(0.5) : (a))
 
 // Lanes whose fast result needs fixing: NaN results (NaN operand or invalid op), RSQRTS overflow.
 #define FBAD(op, r) ((op) == FOP_RSQRTS ? ((r) != (r)) | (__builtin_elementwise_abs(r) == K(INFINITY)) : (r) != (r))
@@ -68,9 +165,9 @@ SN T FN(nan3)(Cpu *c, T a, T b, T d) {
 // (3 + a*b) / 2 with one rounding (a already negated): halve a normal operand first, so a product beyond
 // the format's range (which the fast path rounds to inf, or to the largest normal when rounding down) is exact.
 SN T FN(rsqrts)(T a, T b) {
-    if (__builtin_elementwise_abs(a) >= FN(fv)(2 * MINN)) return __builtin_elementwise_fma(a * K(0.5), b, K(1.5));
-    if (__builtin_elementwise_abs(b) >= FN(fv)(2 * MINN)) return __builtin_elementwise_fma(a, b * K(0.5), K(1.5));
-    return __builtin_elementwise_fma(a, b, K(3)) * K(0.5);
+    if (__builtin_elementwise_abs(a) >= FN(fv)(2 * MINN)) return FFMA(a * K(0.5), b, K(1.5));
+    if (__builtin_elementwise_abs(b) >= FN(fv)(2 * MINN)) return FFMA(a, b * K(0.5), K(1.5));
+    return FFMA(a, b, K(3)) * K(0.5);
 }
 
 // ARM result for a lane flagged by FBAD (operands already flushed).
@@ -338,3 +435,4 @@ SI T FN(recpx)(Cpu *c, T a) {
 #undef MINN
 #undef VK
 #undef K
+#undef FFMA

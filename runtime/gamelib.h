@@ -20,7 +20,8 @@
 #endif
 
 // GAMELIB_ID (-D, from the Makefile): a hash of the generator and the headers the game code is compiled against. A
-// library built with another one is rebuilt, not loaded.
+// library's own id is that plus "-" and the CPU level it was compiled for (gamelib_id()); one built with another id is
+// rebuilt, not loaded. (tools/gamelib_entry.c gets the full id as its GAMELIB_ID.)
 #ifndef GAMELIB_ID
 #define GAMELIB_ID "dev"
 #endif
@@ -57,6 +58,11 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size);
 const GameLibTables *gamelib_tables(void);
 // True when a library usable with this build is in one of those places (without loading it).
 bool gamelib_present(const char *game_dir);
+// The CPU level the game code is built for on this machine: "v3" (x86-64-v3: AVX2, FMA, BMI2) when the CPU has it, else
+// "v2" (x86-64-v2: SSE4.2, slower); LARECOMP_GAME_CPU=v2 asks for v2 on a v3 CPU. "base" off x86-64 (no level).
+const char *gamelib_cpu_level(void);
+// The id a library must carry to be loaded here: GAMELIB_ID "-" gamelib_cpu_level().
+const char *gamelib_id(void);
 
 #ifdef __cplusplus
 }
