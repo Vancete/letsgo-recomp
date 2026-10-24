@@ -6601,6 +6601,53 @@ static uint64_t ip_list_hash(uint64_t handle, int depth) {
     return 0;
 }
 
+// The replay's own copy of the frame's command lists (vk_interp_begin). The game records its next frame into the same
+// command memory while the render thread replays this one, so a replay straight from it could read a record half
+// rewritten: a called list's handle that was garbage (0x5000000001) stopped the game in exec_list (issue #21). The copy
+// is hashed as it is taken - equal to the hash noted when the list ran, it is what ran - and the replay runs it: JUMPs
+// followed (left out of the copy), CALLs pointing at the copies of their lists. Reads stay inside the guest window.
+static uint8_t *ip_copy_buf;
+static size_t ip_copy_cap, ip_copy_len;
+static uint64_t ip_copy_lists[256];
+static bool ip_copy_full;  // the last copy ran out of room
+
+static uint64_t ip_list_copy(uint64_t handle, int depth, uint64_t *hash) {
+    uint64_t h = 0xcbf29ce484222325ull, p = handle, first = 0;
+    for (int guard = 0; guard < 10000000; guard++) {
+        if (p < GUEST_LO || p + sizeof(CmdRec) > GUEST_HI) return 0;
+        if (ip_copy_len + sizeof(CmdRec) > ip_copy_cap) { ip_copy_full = true; return 0; }
+        CmdRec *r = (CmdRec *)(ip_copy_buf + ip_copy_len);
+        memcpy(r, (const void *)(uintptr_t)p, sizeof(CmdRec));
+        uint32_t size = r->size;
+        if (r->op >= CMD_COUNT || size < sizeof(CmdRec) || size > (1u << 20) || (size & 7) || p + size > GUEST_HI) return 0;
+        if (ip_copy_len + size > ip_copy_cap) { ip_copy_full = true; return 0; }
+        memcpy(r->extra, (const uint8_t *)(uintptr_t)p + sizeof(CmdRec), size - sizeof(CmdRec));
+        const uint64_t *w = (const uint64_t *)r;
+        for (uint32_t i = 0; i < size / 8; i++) h = ip_mix(h, w[i]);
+        if (r->op == CMD_JUMP) { p = r->x[0]; continue; }  // (not kept: the next record is copied in its place)
+        if (!first) first = (uint64_t)(uintptr_t)r;
+        ip_copy_len += size;
+        if (r->op == CMD_END) { *hash = h; return first; }
+        if (r->op == CMD_CALL && r->x[0] && depth < 8) {  // (the called lists go after a JUMP over them)
+            if (ip_copy_len + sizeof(CmdRec) > ip_copy_cap) { ip_copy_full = true; return 0; }
+            CmdRec *j = (CmdRec *)(ip_copy_buf + ip_copy_len);
+            memset(j, 0, sizeof *j);
+            j->op = CMD_JUMP, j->size = sizeof(CmdRec);
+            ip_copy_len += sizeof(CmdRec);
+            uint64_t *hs = (uint64_t *)r->extra;
+            for (uint64_t i = 0; i < r->x[0] && depth < 8; i++) {
+                if (sizeof(CmdRec) + (i + 1) * 8 > size) return 0;
+                uint64_t ch = 0;
+                if (!(hs[i] = ip_list_copy(hs[i], depth + 1, &ch))) return 0;
+                h = ip_mix(h, ch);
+            }
+            j->x[0] = (uint64_t)(uintptr_t)(ip_copy_buf + ip_copy_len);
+        }
+        p += size;
+    }
+    return 0;
+}
+
 static void ip_note_list(uint64_t handle) {
     IpFrame *f = &ipf[ipc];
     if (f->nlists >= 256) { f->overflow = true; return; }
@@ -6881,8 +6928,19 @@ bool vk_interp_begin(TexBackend *b, TexBackend **hold, uint64_t period) {
     bool ok = prev->valid && cur->valid && cur->nlists > 0 && !cur->overflow && !prev->overflow && b && b->image &&
               b->aspect == VK_IMAGE_ASPECT_COLOR_BIT && b->samples <= 1 && cur->destroyed == g_nvn_destroyed;
     bool structural = ok;
-    for (int i = 0; ok && i < cur->nlists; i++)
-        if (!cur->hashes[i] || ip_list_hash(cur->lists[i], 0) != cur->hashes[i]) ok = false;
+    if (ok && !ip_copy_buf && (ip_copy_buf = malloc((size_t)8 << 20))) ip_copy_cap = (size_t)8 << 20;
+    ip_copy_len = 0;
+    ip_copy_full = false;
+    for (int i = 0; ok && i < cur->nlists; i++) {
+        uint64_t h = 0;
+        ip_copy_lists[i] = ip_copy_buf ? ip_list_copy(cur->lists[i], 0, &h) : 0;
+        if (!cur->hashes[i] || !ip_copy_lists[i] || h != cur->hashes[i]) ok = false;
+    }
+    if (ip_copy_full && ip_copy_cap < ((size_t)256 << 20)) {  // (out of room: no image this time, a larger copy next)
+        uint8_t *nb = malloc(ip_copy_cap * 2);
+        if (nb) free(ip_copy_buf), ip_copy_buf = nb, ip_copy_cap *= 2;
+        LOG("[interp] the replay's copy of the command lists: %zu MB\n", ip_copy_cap >> 20);
+    }
     if (!ok) {
         if (!prev->valid || !cur->valid || cur->nlists == 0) ip_rej[0]++;
         else if (cur->overflow || prev->overflow) ip_rej[1]++;
@@ -7015,7 +7073,7 @@ void vk_interp_replay(float t) {
     ip_replaying = true;
     ip_ord = 0;
     ip_occ_reset();
-    for (int i = 0; i < cur->nlists; i++) exec_list(cur->lists[i], 0);
+    for (int i = 0; i < cur->nlists; i++) exec_list(ip_copy_lists[i], 0);  // (the copies: ip_list_copy)
     vk_end_pass();
     ip_replaying = false;
     ip_replays++;
