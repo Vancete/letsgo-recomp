@@ -7,7 +7,10 @@ Leva por volta de meia hora, quase toda esperando downloads e a compilação.
 
 ## O que você precisa
 - Windows 10 ou 11, 64 bits
-- CPU com AVX2 (Intel a partir de 2013 / Haswell, AMD a partir de 2015 / Excavator)
+- CPU com SSE4.2 (Intel a partir de 2008 / Nehalem, AMD a partir de 2011 / Bulldozer); com AVX2 (Intel a partir de
+  2013 / Haswell, AMD a partir de 2015 / Excavator) o código do jogo roda mais rápido. O `make` compila o código do
+  jogo para `GENARCH` (padrão `-march=x86-64-v3`; `GENARCH=-march=x86-64-v2` para uma CPU sem AVX2, apagando
+  `build/obj/` antes: os objetos não dependem das flags); a tela inicial escolhe sozinha pela CPU
 - GPU com Vulkan 1.3 e driver atualizado (NVIDIA, AMD ou Intel recentes)
 - Uns 10 GB livres (arquivos do jogo, código gerado e build)
 - [Git for Windows](https://git-scm.com/download/win) (traz o Git Bash)

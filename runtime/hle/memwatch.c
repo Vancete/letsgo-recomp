@@ -4,6 +4,7 @@
 //  LARECOMP_WATCH=<addr>[,<addr>...]        watch these 32-bit words (hex guest addresses) from the start
 //  LARECOMP_WATCH_AT=<present>              ... from that present on instead (a heap object not there at the start)
 //  LARECOMP_WATCH_MAX=<n>                   log only the first n writes (default: all)
+//  LARECOMP_WATCH_READ=1                    reads too (the page is made inaccessible): who reads a table's field
 //  LARECOMP_WATCH_PARTY=<present>           at that present, look for the party's Pokémon (the 0x104-byte PB7 records: species
 //                                           u16 at +8, experience u32 at +0x10, level byte at +0xEC) and watch every
 //                                           experience word found: catching a Pokémon then shows who awards the experience
@@ -32,16 +33,26 @@ static bool watched_page(uint64_t page) {
     return false;
 }
 
+static int g_read = -1;
+static DWORD guard(void) {
+    if (g_read < 0) g_read = getenv("LARECOMP_WATCH_READ") ? atoi(getenv("LARECOMP_WATCH_READ")) : 0;
+    return g_read ? PAGE_NOACCESS : PAGE_READONLY;
+}
+
 static LONG CALLBACK veh(EXCEPTION_POINTERS *ep) {
     EXCEPTION_RECORD *r = ep->ExceptionRecord;
-    if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2 && r->ExceptionInformation[0] == 1) {
+    if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2 &&
+        (r->ExceptionInformation[0] == 1 || (g_read > 0 && r->ExceptionInformation[0] == 0))) {
         uint64_t a = (uint64_t)r->ExceptionInformation[1], page = a & ~0xfffull;
         if (!watched_page(page)) return EXCEPTION_CONTINUE_SEARCH;
         static long max = -2;
-        static volatile long logged;
+        static volatile long logged, seen;
+        if (seen++ < 8) LOG("[watch] f%llu access %llx (%s) on a watched page\n", (unsigned long long)renderer_game_frame(), (unsigned long long)a,
+                             r->ExceptionInformation[0] ? "write" : "read");
         if (max == -2) max = getenv("LARECOMP_WATCH_MAX") ? atol(getenv("LARECOMP_WATCH_MAX")) : -1;
         for (int i = 0; i < g_n && (max < 0 || logged < max); i++) {
-            if (a + 16 > g_addr[i] && a < g_addr[i] + 4) {  // (a store of up to 16 bytes starting before the word: SIMD vectors)
+            // (a store of up to 16 bytes starting before the word: SIMD vectors; a read, up to 64: a block copy)
+            if (a + (r->ExceptionInformation[0] ? 16 : 64) > g_addr[i] && a < g_addr[i] + 4) {
                 logged++;
                 LOG("[watch] f%llu write to %llx (was %08x)\n", (unsigned long long)renderer_game_frame(), (unsigned long long)g_addr[i],
                     *(volatile uint32_t *)(uintptr_t)g_addr[i]);
@@ -57,7 +68,7 @@ static LONG CALLBACK veh(EXCEPTION_POINTERS *ep) {
     }
     if (r->ExceptionCode == EXCEPTION_SINGLE_STEP && t_rearm) {
         DWORD old;
-        VirtualProtect((void *)(uintptr_t)t_rearm, 4096, PAGE_READONLY, &old);
+        VirtualProtect((void *)(uintptr_t)t_rearm, 4096, guard(), &old);
         t_rearm = 0;
         return EXCEPTION_CONTINUE_EXECUTION;
     }

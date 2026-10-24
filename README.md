@@ -52,7 +52,7 @@ In the game, **F12** opens the same settings, applied at once:
 | | |
 |---|---|
 | OS | Windows 10 or 11, 64-bit |
-| CPU | x86-64 with AVX2, FMA and BMI2 (Intel Haswell / AMD Zen or newer) |
+| CPU | x86-64 with SSE4.2 (Intel Nehalem / AMD Bulldozer or newer); AVX2 (Intel Haswell / AMD Zen or newer) recommended: without it the game code is built for older CPUs and runs slower |
 | GPU | Vulkan 1.3 |
 | RAM | about 4 GB while playing (5.2 GB during the one-time setup) |
 | Disk | about 6 GB free |

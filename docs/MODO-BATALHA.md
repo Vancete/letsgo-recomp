@@ -192,6 +192,157 @@ a outra metade na captura. **Não implementado.** O que a pesquisa trouxe:
   captura jogada à mão no mesmo boot; ou achar a função que escreve a tela "Exp. Points" (o valor 20/11 passa por um
   `SetNumber` de mensagem); ou somar o XP por conta própria depois de achar o campo.
 
+## Etapa 6 (22/10/2026): capturar no meio da batalha, com a vida e o status contando
+Objetivo (pedido do usuário): uma opção nova e nativa no menu da batalha ("Capturar"), uma bola por vez, chance maior com
+o selvagem fraco ou com status, desmaiou = perdeu a chance. Tudo abaixo foi visto em execução (save `build/save-edit`,
+Rota 1, Bulbasaur andando junto), salvo onde diz "estático".
+
+**O motor de batalha não tem mais o arremesso clássico.** As sequências de bola em `bin/battle/waza/sequence` (`ee410`,
+`ee412`, `ee420`, `ee422`, `ee430`..`ee460`) são todas de mandar o Pokémon à luta (`to_ee400_ball`,
+`Play_SE_battle_sys_018_ball_throw`); não há sacudida nem captura. A captura é sempre a cena estilo GO.
+
+**Do fim da batalha à captura** (estados do evento de batalha `28be80`, palavra `[+0x68]`; `[+0x720]` a batalha):
+- 0 prepara, 1 espera o fade, 2/3 criam a batalha, **4 batalha correndo**, 5 fim: cria o processo pós-batalha
+  (classe B, update `319bc0`) com `[B+0x88]` = a batalha e `[B+0xb8]` = tipo (`[evento+0xd0]`, 2 aqui);
+  6/7/8/12 encerram e o processo da classe A termina.
+- O **resultado** fica em `[[evento+0x720]+0x68]+0x508`: **1 vitória, 3 fuga**. O estado 0 da classe B, com tipo 2,
+  vai para o estado 3 (`319e20` → `31a0e0` → `28ef70`, **a captura**) se o resultado for 1, senão para o 4 (fim).
+- Prova: com a fuga trocada por vitória no estado 5 (o que o modo faz hoje quando o jogador pede a captura), o Rattata com a vida cheia
+  saiu da batalha pelo RUN e o jogo abriu a captura nativa ("Oh! You encountered a wild Rattata!" → capturado).
+
+**A vida e o status do selvagem.** O objeto da biblioteca que vai à captura (`[B+0xc0]`) **não** recebe a vida da
+batalha (21/21 depois de o selvagem desmaiar). Quem tem a vida é o Pokémon de batalha (BTL_POKEPARAM): no fim da
+batalha, vitória **ou fuga**, `9e4280(bpp)` (ReflectToPP) grava de volta na biblioteca, um por Pokémon (os do jogador e
+por último o selvagem). Campos: `+0x60` o objeto da biblioteca, `+0x78` espécie (u16), `+0x7c` HP máximo, **`+0x7e` HP
+atual**, condições nos 3 bits baixos de `+0xa0` (paralisia), `+0xa8` (sono), `+0xb0` (congelado), `+0xb8` (queimadura),
+`+0xc0` (veneno), na ordem 1..5 da biblioteca. Medido: fuga com o Rattata em 10/21; vitória com ele em 0/20.
+- Biblioteca (pml): `CoreParam` = objeto com o acessor em `+0x98`; acessor `[+0x10]` bloco principal (chave u32 em +0,
+  0xE0 bytes cifrados a partir de +8), `[+8]` bloco de batalha (0x1C bytes: status u32, nível +4, HP +8, HP máximo +0xA,
+  como o PB7 em +0xE8), cifrados com a mesma chave enquanto `[acc+0x18]` (LCG `0x41C64E6D`/`0x6073`, `739640`).
+  Espécie `724950`, GetHp do acessor `729ea0`, GetMaxHp `729fc0`, SetHp `730de0`, `CoreParam::SetHp` `7265d0`.
+
+**A fórmula de captura** (`7de080`, chamada a cada quadro da cena, também para a cor do anel): lê espécie/forma
+(`+0`, `+4`), bola (`+0xc`) e fruta (`+0x10`) por tabela, os multiplicadores do arremesso (`+0x14..+0x20`), o nível
+(`+0x24`, até 100) e **a taxa da espécie** por `71fc30(8)` → `71dfd0` (GetPersonalParam: `[this+0x10]` = registro de
+0x54 bytes do `personal_total.bin`, **id 8 = taxa de captura**, o byte +8). Pidgey/Rattata 255, Pikachu 190, Eevee 45,
+Snorlax 25. Ninguém mais pede a taxa durante a captura (registro com `LARECOMP_WILDBATTLE_CATCHLOG=1`). Obs.: a cópia
+crua do `personal_total.bin` no heap (`0x729e0ea268`) não é lida por ninguém (vigia de leitura).
+
+**O menu de comandos** (quadro "battle act select main frame", fábrica `aaa860` → `aaac10`, objeto de 0x190 bytes,
+construtor `aab290`, vtable pela GOT `0x7001608ed8`): `ab2620` é o laço; `ab1960` lê o evento (1 = um botão do
+`uikit` decidido); `ab1af0` → `ab1e80` traduz o **id do botão** (`[evento+4]`, do `uikit_setting_battle_command_00.bin`)
+na ação gravada em `[[...]+0x78]+0x10`: id 1 → 1 (Lutar), 2 → 2, 3 → 3, 4 → 4 (Fugir), 5 → info, 6 → parceiro, 7 → 0xA.
+Um id novo cai no caso vazio. O layout (`bin/app/battle/bin/battle_command_00*.arc`, SARC com BFLYT e até o XML-fonte)
+tem os painéis `N_command_00..03`/`L_command_00..03` e as animações `command_patern_00/01`; o `layout_setting` e o
+`uikit_setting` são FlatBuffers que ligam painéis e ids por hash.
+
+**A decisão da bola** (`7dcb00`, o "juiz" do arremesso): `b = 65536 / (255/a)^(3/16)`, quatro checagens com o xorshift da
+cena (`[[+8]+0x720/0x728]`), as que passaram em `[juiz+0x128]` (4 = pegou; Master Ball e o caso `[+0x748] == 3` forçam 4).
+`7dd230` decide o próximo estado (0 sacudidas → 6, senão 1). A cena toca as sequências por índice (`80f510(cena+0x238, n)`;
+13/14 = o Pokémon fugindo, normal ou lendário).
+
+**A saída da cena sem pegar**: `919970` ("acabaram as bolas": a mochila não tem os itens 4, 12, 5, 3, 2 nem 1, via `1c9750`)
+leva a cena à fala 7 do `poke_get` ("You don't have a single Poké Ball left! You'll have to withdraw for now...") e ao fim
+nativo. O "Run away" do menu da cena também termina ("Do you want to give up catching this Pokémon?" → Yes).
+
+**As falas** (`bin/message/<idioma>/common/*.dat`, texto GF cifrado: chave `0x7C89 + i*0x2983` por linha, rotação de 3 bits
+por caractere): `btl_std` linha 82 "You got away safely!", `poke_get` linhas 1 ("Oh! You encountered a wild X!"),
+2 ("Now's your chance! Catch the wild X!", a dos lendários), 7 (sem bolas), 8–11 (escapou, conforme as sacudidas),
+13 (fugiu), 14 ("You got away safely!"). Toda linha passa por `6786b0` (x0 = dados do arquivo, `[+0x90]`+2 = número
+de linhas, `[+0x98]` a tabela de linhas, 8 bytes a partir de +4; x1 = a linha cifrada, w2 = tamanho, w3 = índice, x4 = o
+buffer: texto u16 em `+0x58`, capacidade `+0x78`, tamanho `+0x7a`). `btl_std` tem 392 linhas e `poke_get` 70 em todos
+os idiomas. O objeto que chega lá não é o do carregamento (`1afc00`).
+
+**O 5º botão (CATCH), nativo.** Como o menu monta os botões (tudo visto em execução, Eevee e Pikachu):
+- O `.arc` do idioma (`battle_command_00{,_eng,...}.arc`, SARC) tem o layout do menu (`blyt/battle_command_00.bflyt`) e o
+  do botão (`blyt/battle_command_button_00.bflyt`, uma "parte" usada por `L_command_00..03`). A aparência de cada botão vem
+  da animação `patern_00` do botão: quadros 0 lutar, 1 Pokémon, 2 mochila, 3 fugir, 4 voltar (este só no modo de 2
+  jogadores). Ela troca as texturas (círculo `battle_command_*_off_00` BC3 100×100, ícone `battle_button_command_icon_0N`
+  BC4 200×200, rótulos `grpfont_battle_*Button_text_00` BC5 e `_text_01` BC4 160×128: o texto é imagem, uma por idioma) e
+  as cores dos materiais (brilho e camadas de fundo: cor branca do material; sombra do rótulo: cor preta; no `mat1`,
+  `+0x24`/`+0x28` depois do nome).
+- O código (`ab2730` → `ab2e60` para cada uma das 4 vistas em `menu+0x288..0x2e8`) acha o botão do `uikit` por uma
+  tabela fixa de 4 hashes (`0x7000f84c50`), aplica a animação de padrão (hashes fixos no código) e grava no botão o
+  callback de decisão (`[botão+0x150..0x168]` = `ab49f0`/`ab4a20`/`ab4a30`/`ab4a50`, `+0x170` a vista, `+0x178` o evento):
+  ao decidir, `{1, tabela 0x7000f98258[quadro da vista]}` → ids 1..4 e 7; `ab1e80` traduz o id em ação.
+- Os 4 botões são posicionados pelo código a partir da borda direita da área `B_bounding_00` (RUN = borda − 66, os outros
+  a cada 136); a grade de navegação do `uikit` tem o número de colunas no campo `f1` da tabela de navegação (4).
+- Em batalhas de treinador o código esconde o RUN (`34e8b0` pelo hash) e fica com 3 botões.
+
+O que o runtime faz (`runtime/hle/catch_button.c`, a partir dos arquivos do próprio jogador; `tools/catch_button.py` é o
+mesmo em Python e `tools/catch_button_art.py` desenha a arte, embutida em `runtime/hle/catch_button_art.h`):
+- texturas do botão VOLTAR redesenhadas como CATCH (mesmo tamanho e formato; compressão `stb_dxt`, swizzle do Tegra);
+  rótulos CATCH / CAPTURE / Fangen / CATTURA / CAPTURAR / つかまえる / 잡는다 / 捕捉 (com "CATCH" pequeno nos asiáticos);
+- `blyt/battle_command_button_catch.bflyt`: cópia do layout do botão apontando para essas texturas, em vermelho, sem a
+  animação de padrão; no layout do menu, `N_command_04`/`L_command_04` no lugar do RUN, e os 4 botões e a área
+  `B_bounding_00` um passo (136) à esquerda;
+- `layout_setting`: os 20 painéis novos e as 6 animações do `L_command_04`; `uikit_setting`: o 5º botão (o do RUN com os
+  hashes derivados: FNV-1a 64 de `"%016x:catch"`) e a 5ª coluna da grade (5 colunas). FlatBuffers só recebem acréscimos no
+  fim (offsets apontam para frente: as listas que crescem são copiadas inteiras);
+- `runtime/services/fs.c` registra os 11 arquivos com dois conteúdos: o montado, entregue enquanto uma batalha do modo
+  roda (`wildbattle_menu_active`), e o original completado com zeros até o mesmo tamanho nas outras batalhas;
+- `views_hook` (`ab2730`) grava no CATCH o mesmo callback com uma vista própria de quadro 5 (id 0, que o jogo ignora);
+  `invoke_hook` (`ab49f0`) nota que foi o CATCH e `decide_hook` (`ab1e80`) transforma em pedido de captura.
+
+**Implementado** (`runtime/hle/wildbattle.c`, "Catching during the battle"; testado no Eevee e no Pikachu, save
+`build/save-edit`):
+- CATCH → a batalha termina como fuga, que o estado 5 do evento troca por vitória → a captura nativa;
+- vida, vida máxima e status do selvagem guardados no `9e4280` (id `+0x87` ≥ 6); a taxa da espécie que a fórmula pede
+  (`71dfd0`, id 8) vira `taxa × (3·máx − 2·vida)/máx × (2,5 sono/congelado; 1,5 paralisia/veneno/queimadura)`, até 255.
+  O anel da cena muda de cor junto (visto: vermelho com taxa 1);
+- desmaiou (vitória com vida 0) → o resultado vira fuga → sem captura;
+- uma bola por vez: depois de uma bola que não pegou (`7dcb00`), `919970` responde "sem bolas" → a cena se encerra
+  sozinha → **a batalha de novo** (do laço do mundo, `2f78d0`, ainda com a tela escura), com a vida e os blocos de status
+  postos de volta no Pokémon de batalha quando ele é montado (`9e2490`, BTL_POKEPARAM::Setup). Visto: Pidgey 3/17 →
+  captura sem sucesso → revanche com a barra em 3/17 → desmaiou → sem captura;
+- falas: "Time to catch it!" no lugar do "You got away safely!" da batalha; "Now's your chance! Catch the wild X!" (a
+  linha 2 nativa) no lugar do "Oh! You encountered..."; "It's still raring to go! Back to the battle!" no lugar da fala
+  de "sem bolas". Textos próprios nos 9 idiomas do jogo (`k_catch_text`).
+
+**Ferramentas novas** (docs/DEPURACAO.md): entradas `b<N>:<botão>:<len>` e `c<N>:...` no `LARECOMP_INPUT` (a partir do início
+da batalha / da captura) e `LARECOMP_FNPROF=b<de>:<até>`; `LARECOMP_WATCH_READ=1` vigia leituras; `LARECOMP_WILDBATTLE_*`:
+`STATE_LOG`, `CATCHLOG`, `HPLOG`, `HPSCAN`, `MENULOG`, `MSGLOG`, `AUTOCATCH`, `FORCE_RATE`, `CATCH_MENU`, `CATCH_DUMP`.
+
+**Ajustes depois do primeiro teste do usuário** (23/10/2026; detalhes no HISTORICO):
+- posição: a área `B_bounding_00` fica onde está (com 5 botões o jogo já começa um passo antes): o CATCH termina onde o
+  RUN terminava;
+- sem relógio: `28c770` (montagem da batalha estática) grava 300 s em `+0x562` do evento; o gancho zera só nas nossas.
+  O bit `0x80` de `+0x574` fica: sem ele o selvagem desmaia do jeito das batalhas de treinador, cuja sequência procura
+  um modelo inexistente (`a9c700`);
+- XP: `9d8ae0` (a checagem "XP ligada": competidor ≤ 1, setup `+0x4a4` zero, sem `0x80`/`0x800` em `+0x494`) responde sim
+  nas nossas batalhas: o nocaute dá a XP nativa (fala 44/46 do `btl_std`, barra, subida de nível) e a batalha acaba;
+- o "Run away" da captura: falas 24/4/14 do `poke_get` trocadas na nossa captura ("Back to battle", "Do you want to go back
+  to the battle?", "Back to the battle!");
+- a volta à batalha: `ee330.bseq` (a câmera de entrada do selvagem) de 1 quadro, entregue pelo `fs.c` só na volta
+  (`wildbattle_quick_intro`), e a janela de "A wild X appeared!" não abre (`aaf230`); o envio (`ee420`, ou o parceiro
+  do ombro) fica inteiro, mas escondido: fade-in segurado, sem ritmo de quadros e sem som até o menu (`ab2730`);
+- "Back to battle" sem confirmação: o diálogo de saída da captura (`7d2380`) vai do estado 0 (`7de440`, a pergunta)
+  direto ao 1 (`7de7d0`, a saída); o runtime aperta A na fala seguinte (`input_press_a_at`);
+- texturas com mipmaps (o mod PT-BR): todos os níveis regravados;
+- depois de uma bola que estoura, o selvagem age primeiro: o menu da volta é respondido escondido com uma fuga que falha
+  (`9f7300` responde não; a fala 83 não abre), então o turno é só dele;
+- chance de captura: o fator de vida/status vai no resultado da fórmula (`7de080`: `taxa^0,54 × ...`, até 255), não na
+  taxa da espécie;
+- CATCH com o Pokémon preso (Wrap etc.): a checagem de fuga do cliente (`a5c350`) responde sim;
+- evolução: depois de um nocaute nosso, o pós-batalha (`319bc0`) vai do estado 0 ao 1 (o laço de evolução das batalhas de
+  treinador: `728300` checa, `83cef0` abre o evento de evolução) em vez do 4 (fim).
+Endereços novos no Pikachu: `28c770` → `28c740`, `9d8ae0` → `9d8af0`, `7de080` → `7de0b0`, `a5c350` → `a5c360`,
+`aaf230` → `aaf240`, `319bc0` → `319b90`, `7de440` → `7de470`, `9f7300` → `9f7310`. Testado por roteiro nos dois jogos.
+
+**O inicial andando sozinho** (24/10/2026, issues #6/#22; HISTORICO): também batalha. Nas nossas batalhas, com ele sozinho,
+`a7e090` ("é o inicial?") responde não, então ele sai de uma Poké Ball, e `a99b40` (o Pokémon do modelo de batalha)
+recebe a forma 0: o modelo da espécie em vez do modelo de campo de quem anda junto, que a batalha estática não tem.
+Pikachu: `a7e090` → `a7e0a0`, `a99b40` → `a99b50`.
+
+**Desmaio e música** (24/10/2026; HISTORICO): o bit `0x80` de `+0x574` sai quando o menu aparece, e o selvagem derrotado
+desmaia como nas batalhas de treinador (`ee620`; `a9c700` responde "sem junta" a um modelo de chave 0). A música:
+`16d060` (eventos do Wwise por nome) não manda o `Pop_BGM_battle_to_field` de uma captura que volta para a batalha nem o
+`Push_BGM_field_to_battle` da volta. Pikachu: `a9c700` → `a9c710`, `16d060` → `16d030`.
+
+**Falta**: com o mod de tradução PT-BR o CATCH aparece como um quadrado preto (HISTORICO); a espera de ~12 s entre escolher (CATCH ou o RUN do jogo, igual) e a batalha sair; natureza/shiny/habilidade
+do Pokémon tocado; ver uma batalha de treinador de verdade com o menu original (testado só com `CATCH_MENU=0`); os
+rótulos dentro do jogo em outros idiomas (conferidos decodificando os arquivos montados, `CATCH_DUMP`).
+
 ## Próximas etapas
 _Atualizado em 17/10/2026: os itens 4 e "ligar/desligar no launcher" do 5 foram feitos (Etapa 4 acima, opção
 "Batalhas selvagens (experimental)" desde a 0.2.0, nos dois jogos desde a 0.2.1). Falta o resto do 5 (XP dividido, fuga,
