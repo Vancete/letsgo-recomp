@@ -21,6 +21,13 @@
   Points, instead of the battle just ending. And going to the capture and back no longer leaves the field's music
   playing over the battle's: the battle's music goes on through the capture and the battle again.
 
+- **Fix: the game closing after some minutes with 60 fps or frame generation on** (issue #21): the in-between images
+  re-ran the frame's command lists from the game's memory while the game was already recording the next frame there.
+  They now re-run a copy, checked against what ran.
+- **Fix: shadow lookups on a colour texture in battles** (issue #24): with no shadow map the game binds a small colour
+  texture where the shader compares depth, which Vulkan leaves undefined (a possible cause of the "device lost" on an
+  RTX 5070); a depth stand-in is bound instead, with the same lit result.
+
 ## 0.6.0 (2026-10-22)
 
 Iván Serrano's ([@Vancete](https://github.com/Vancete), PRs #17 and #19): the in-house frame generation, SSAO Ultra,

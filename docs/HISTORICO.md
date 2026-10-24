@@ -638,3 +638,31 @@ Pedido: capturar a qualquer momento da batalha, mais fácil com o selvagem fraco
   Pop. Os testes rodam sem som: o usuário jogou (capturas, bola que estourou e volta, "Back to battle", nocautes) e
   confirmou a música e o desmaio.
 - Endereços no Pikachu: `a9c700` → `a9c710`, `16d060` → `16d030`.
+
+## Issue #21: o jogo fechava depois de minutos, na reexecução das imagens intermediárias (24/10/2026)
+- **Sintoma.** Fecha depois de 5 a 15 minutos (0.5.0 e 0.6.0, AMD RX 6600 XT; outros relatos sem log), com o 60 fps
+  ligado: `c0000005` lendo `0x5000000001` numa thread do runtime.
+- **Diagnóstico.** O log tem só endereços do runtime; recompilei a 0.5.0 numa worktree (mesmo compilador) e simbolizei
+  com `nm`: `exec_list` dentro de `vk_interp_render` (a reexecução de um quadro para as imagens intermediárias),
+  na thread de renderização.
+- **Causa.** A reexecução lia as listas de comando direto da memória de comandos do jogo, que ele reaproveita para
+  gravar o quadro seguinte enquanto a thread de renderização reexecuta este. O hash das listas era conferido no
+  começo (`vk_interp_begin`), mas a leitura acontecia depois: um registro meio reescrito deu a uma lista chamada (CALL) o
+  endereço `0x5000000001`.
+- **Correção.** No `vk_interp_begin` as listas são copiadas para um buffer do runtime (`ip_list_copy`, 8 MB, dobra se
+  faltar), com o hash calculado sobre a cópia e conferido com o da hora em que rodaram; a reexecução roda a cópia (JUMPs
+  seguidos, CALLs apontando para as cópias, com um JUMP por cima delas). As leituras ficam dentro da janela do guest.
+  Primeira versão errada: as listas chamadas ficavam logo depois do CALL e a lista de cima continuava dentro delas
+  ("0 blended"). Testado: geração de quadros 2x, a mistura nos mesmos níveis das rodadas sem a mudança (variação
+  normal entre rodadas maior que a diferença). O crash não foi reproduzido aqui; a correção é pela causa.
+
+## Issue #24: amostragem de sombra numa textura de cor, em batalha (24/10/2026)
+- **Sintoma.** "Device lost" (`address ip invalid`) numa RTX 5070 Laptop em batalha, quando o Bellsprout usa Wrap; sem
+  imagens intermediárias naquela hora (batalha a 30).
+- **O que se achou.** Na RTX 3080 o Wrap não trava. Com a camada de validação: `VUID-vkCmdDrawIndexed-None-06479`, um
+  shader de batalha faz uma comparação de profundidade (sombra) numa textura RGBA8: o jogo liga ali uma textura de cor
+  16x16 (formato `0x25`) quando não tem mapa de sombra. No Switch a comparação lê o vermelho dela; no Vulkan é
+  indefinido. (Um travamento da GPU numa rodada com validação, na tela de resumo, não se repetiu sem ela.)
+- **Correção.** Slot de comparação sem textura de profundidade recebe uma imagem de profundidade 1x1 em 1,0
+  (`vk_dummy_depth_view`): tudo iluminado, como contra a textura branca. Validação limpa em batalha com Wrap (3 usos);
+  imagens iguais. Se era a causa do travamento da 5070 só o autor da issue pode confirmar.
