@@ -2992,6 +2992,9 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
             smp = vk_sampler_biased(sd, g_mip_bias);
         else smp = vk_sampler(sd);
     }
+    // a depth-compare lookup without a depth texture (the game's colour stand-in when it has no shadow map): a depth one
+    // at 1.0 (vk_dummy_depth_view; a compare on a colour format is undefined in Vulkan)
+    if (st_->shadow && (!view || !tx || !renderer_format_is_depth(tx->format))) view = vk_dummy_depth_view(st_->type);
     if (!view) view = vk_dummy_view(st_->type);
     if (!smp) smp = vk_default_sampler(true);
     *out = (VkDescriptorImageInfo){smp, view, VK_IMAGE_LAYOUT_GENERAL};
