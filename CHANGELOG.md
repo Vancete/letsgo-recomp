@@ -1,7 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 (2026-10-24)
 
+Iván Serrano's ([@Vancete](https://github.com/Vancete), PR #26): CPUs without AVX2.
+
+- **Runs on CPUs without AVX2** (issue #7): the start screen builds the game code for the machine's CPU, x86-64-v3
+  (AVX2, FMA, BMI2) as before where the CPU has it, x86-64-v2 (SSE4.2) otherwise. On an older CPU the fused
+  multiply-adds are done exactly in software and cost more.
 - **Wild battles: catch during the battle, with a CATCH button.** The battle menu gets a fifth button, CATCH, next to RUN,
   drawn in the game's style in its nine languages (built at start from the player's own game files; trainer and
   two-player battles keep their four buttons). It throws one Poké Ball through the game's own capture scene, and the
