@@ -650,7 +650,7 @@ void ui_page_image_sound(void) {
 }
 
 // ------------------------------------------------------------------ advanced
-// The motion vectors' detail, the effects' parameters by hand and the debug views (shown at the present instead of the
+// The motion vectors' detail, the frame generation's method, the effects' parameters by hand and the debug views (shown at the present instead of the
 // game image: exec.c post_process).
 // The parameters (runtime/settings.c settings_apply_levels): the sliders show the quality levels' values; moving any of
 // them turns "Custom parameters" on with the values as they are, so the levels then only turn the SSAO and the GI on
@@ -688,12 +688,36 @@ void ui_page_advanced(void) {
                        UI_T("Occlusion alone", "Só a oclusão", "Только затенение"),
                        UI_T("Indirect light alone", "Só a luz indireta", "Только непрямой свет"),
                        UI_T("Motion vectors", "Vetores de movimento", "Векторы движения"),
+                       UI_T("Frame generation method", "Método da geração de quadros", "Метод генерации кадров"),
                        l_rad, l_int, l_smp, l_tmp, l_cs, l_len, l_str, l_stp, l_thk, l_ray, l_res, l_cus};
-    float x = ui_label_x(l, 16);
+    float x = ui_label_x(l, 17);
     ui_toggle("##mv_objects", l[0], x, &g_settings.mv_objects);
     ui_tip(UI_T("The motion of each object, not only the camera's, for TAA, FSR 3.1 and the frame generation.",
                 "O movimento de cada objeto, não só o da câmera, para o TAA, o FSR 3.1 e a geração de quadros.",
                 "Движение каждого объекта, а не только камеры, для TAA, FSR 3.1 и генерации кадров."));
+    // How the frame generation's in-between images are made (exec.c): the frame's draws again (re-render, the default),
+    // or the last two images moved along the motion vectors and an image-based flow (optical flow: much cheaper on the
+    // GPU, less exact where things uncover). Only with the frame generation on (graphics page).
+    {
+        const char *fm[] = {UI_T("Re-render", "Redesenhar", "Перерисовка"), UI_T("Optical flow", "Fluxo óptico", "Оптический поток")};
+        ui_row(l[4], x);
+        ImGui::BeginDisabled(!g_settings.frame_gen);
+        ui_combo("##fgm", &g_settings.fg_method, fm, 2);
+        ImGui::EndDisabled();
+        ui_tip(g_settings.fg_method == FG_FLOW
+               ? UI_T("Optical flow: the extra images are made from the last two frames, moved along the motion of each pixel. "
+                      "Much lighter on the GPU; edges of moving things, shadows and thin grass can smear a little.",
+                      "Fluxo óptico: as imagens a mais são feitas a partir dos dois últimos quadros, deslocados pelo movimento de cada pixel. "
+                      "Muito mais leve para a GPU; bordas de coisas em movimento, sombras e grama fina podem borrar um pouco.",
+                      "Оптический поток: дополнительные кадры строятся из двух последних, сдвинутых по движению каждого пикселя. "
+                      "Намного легче для GPU; края движущихся объектов, тени и тонкая трава могут слегка размываться.")
+               : UI_T("Re-render (default): the scene is drawn again for each extra image, with everything halfway between two "
+                      "frames. The most exact, the heaviest on the GPU.",
+                      "Redesenhar (padrão): a cena é desenhada de novo para cada imagem a mais, com tudo a meio caminho entre dois "
+                      "quadros. O mais exato, o mais pesado para a GPU.",
+                      "Перерисовка (по умолчанию): сцена рисуется заново для каждого дополнительного кадра, всё на полпути между "
+                      "двумя кадрами. Точнее всего, но тяжелее всего для GPU."));
+    }
 
     // ---- the effects' parameters
     ui_heading(UI_T("Effect tuning", "Ajuste dos efeitos", "Настройка эффектов"));
@@ -787,6 +811,7 @@ void ui_page_advanced(void) {
     if (ui_button(UI_T("Reset", "Restaurar", "Сбросить"))) {
         g_settings.ssao_debug = g_settings.gi_debug = g_settings.mv_debug = false;
         g_settings.mv_objects = true;
+        g_settings.fg_method = FG_RERENDER;
         g_settings.fx_custom = false;
         settings_apply_levels();
     }
