@@ -742,3 +742,15 @@ Pedido: capturar a qualquer momento da batalha, mais fácil com o selvagem fraco
   instrumentados), e GPU-AV com `LARECOMP_NO_ROBUST=1` (acessos fora dos limites que a robustez esconde): nenhum erro.
   Aponta para o driver ou a placa; pedidos ao autor: versão do driver e testes desligando o que só a NVIDIA usa
   (`LARECOMP_WRITE_WATCH=0`, `LARECOMP_VK_NO_GMEM=1`, `LARECOMP_VERTEX_READ=copy`, `LARECOMP_ONE_QUEUE=1`).
+
+## Issue #31: o jogo fechava logo no início com 2002-6063 (24/10/2026)
+- **Log.** Pikachu, RTX 3060 Ti: depois do `fsp-srv` só uma leitura do RomFS (`romfs reads: 1 (0 KB)`) e
+  `svcBreak` com o resultado 2002-6063. Falta a linha `[fs] romfs index: N files`, que numa execução normal vem antes:
+  o índice do `extracted/romfs.bin` não pôde ser lido, então a imagem dele é inválida (cortada, ou o `romfs.bin` de
+  outra ferramenta que a configuração copiou como estava); o jogo leu um cabeçalho sem sentido e parou.
+- **Correção.** `romfs_image_ok` (runtime/romfs_build.c) confere a imagem: cabeçalho de 0x50 bytes, tabelas e dados
+  dentro do arquivo, e reconhece uma imagem IVFC. A configuração recusa uma imagem assim (falha nova
+  `SETUP_FAIL_IMAGE`, com mensagem na tela inicial e o motivo no log); com a imagem já instalada, a tela inicial mostra
+  essa falha e pede a configuração de novo; no boot, `fs.c` para com uma mensagem clara em vez do 2002-6063. Testado:
+  imagem cortada em 1 MB ("tables point past its end") e uma com cabeçalho IVFC param com a mensagem; a imagem boa
+  segue (27818 arquivos). Não sei ainda qual era a imagem do autor da issue: pedido o tamanho dela e de onde veio.
