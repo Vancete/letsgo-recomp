@@ -606,11 +606,13 @@ static void render_frame(Renderer *r, float *stereo) {
     }
 }
 
-// Output gain: menu volume times LARECOMP_AUDIO_GAIN (applied live).
+// Output gain: menu volume times LARECOMP_AUDIO_GAIN (applied live), silenced while g_audio_muted
+// (runtime/hle/wildbattle.c: an opening run through fast).
+volatile int g_audio_muted;
 static void apply_gain(SDL_AudioStream *st) {
     static double env = -1;
     if (env < 0) env = getenv("LARECOMP_AUDIO_GAIN") ? atof(getenv("LARECOMP_AUDIO_GAIN")) : 1.0;
-    float g = (float)(env * g_settings.volume);
+    float g = g_audio_muted ? 0.0f : (float)(env * g_settings.volume);
     if (st && SDL_GetAudioStreamGain(st) != g) SDL_SetAudioStreamGain(st, g);
 }
 

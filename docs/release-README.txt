@@ -15,7 +15,9 @@ Packed files (.xci, .nsp, .nsz, .nca) must be extracted first.
 Requirements
 ------------
 - Windows 10 or 11, 64-bit
-- A CPU with AVX2, FMA and BMI2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or newer); checked at startup
+- A CPU with SSE4.2 (Intel Nehalem / 2008 or newer, AMD Bulldozer / 2011 or newer); checked at startup. AVX2
+  (Intel Haswell / 2013 or newer, AMD Excavator / Zen or newer) is recommended: without it the game code is built
+  for older CPUs during setup, with the same results but slower
 - A GPU whose driver supports Vulkan 1.3 (GPUs that report less are skipped); see vulkan.gpuinfo.org for yours
 - RAM: the game used up to 3.8 GB while playing, the one-time setup 5.2 GB (measured). Tested on a 32 GB machine
 - About 6 GB of free disk space (measured: 5.7 GB at the peak of the one-time setup, 4.6 GB afterwards)

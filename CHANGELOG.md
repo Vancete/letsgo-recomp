@@ -40,6 +40,39 @@
 - **Title screen: no contact shadows** (SSAO Ultra): on its close-up of Pikachu they drew the shadows of its own arms
   onto its chest as jagged dark triangles. They are made for the world's scale (feet, grass, small props).
 
+## 0.7.0 (2026-10-24)
+
+Iván Serrano's ([@Vancete](https://github.com/Vancete), PR #26): CPUs without AVX2.
+
+- **Runs on CPUs without AVX2** (issue #7): the start screen builds the game code for the machine's CPU, x86-64-v3
+  (AVX2, FMA, BMI2) as before where the CPU has it, x86-64-v2 (SSE4.2) otherwise. On an older CPU the fused
+  multiply-adds are done exactly in software and cost more.
+- **Wild battles: catch during the battle, with a CATCH button.** The battle menu gets a fifth button, CATCH, next to RUN,
+  drawn in the game's style in its nine languages (built at start from the player's own game files; trainer and
+  two-player battles keep their four buttons). It throws one Poké Ball through the game's own capture scene, and the
+  catch rate grows as the wild Pokémon weakens: up to x3 nearly fainted, x2.5 asleep or frozen, x1.5 paralysed, burnt
+  or poisoned; the ring's colour follows it. If the Pokémon breaks free, or you choose "Back to battle" (the capture's
+  Run away, renamed), the battle comes back (no question, a short dark screen, then your Pokémon already out) with the HP and status it
+  had - and after a ball that broke, the wild Pokémon moves first: the throw was your turn; if it
+  faints, it is lost, but the party gets its Exp. Points (the game's own: levels, new moves, and evolutions after the battle). The wild battles
+  no longer have the legendaries' 5-minute clock, and CATCH works even when a move like Wrap holds your Pokémon. Tested
+  on Eevee and Pikachu.
+- **Wild battles also with only the starter walking along** (issues #6 and #22): since 0.4.2 they needed another
+  Pokémon from the party walking with the player (without it the battle broke), and otherwise the touch went to the
+  usual capture - with Pikachu on the shoulder and no one walking along, the option looked like it did nothing. Now the
+  starter is sent out from a Poké Ball with its species' battle model. Tested with Eevee walking alone, on Eevee and
+  Pikachu.
+- **Wild battles: a knocked out wild Pokémon faints** ("Rattata fainted!", it falls and is called back) before the Exp.
+  Points, instead of the battle just ending. And going to the capture and back no longer leaves the field's music
+  playing over the battle's: the battle's music goes on through the capture and the battle again.
+
+- **Fix: the game closing after some minutes with 60 fps or frame generation on** (issue #21): the in-between images
+  re-ran the frame's command lists from the game's memory while the game was already recording the next frame there.
+  They now re-run a copy, checked against what ran.
+- **Fix: shadow lookups on a colour texture in battles** (issue #24): with no shadow map the game binds a small colour
+  texture where the shader compares depth, which Vulkan leaves undefined (a possible cause of the "device lost" on an
+  RTX 5070); a depth stand-in is bound instead, with the same lit result.
+
 ## 0.6.0 (2026-10-22)
 
 Iván Serrano's ([@Vancete](https://github.com/Vancete), PRs #17 and #19): the in-house frame generation, SSAO Ultra,
