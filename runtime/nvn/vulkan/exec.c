@@ -5395,12 +5395,14 @@ static void ui_snapshot_check(Prog *pr) {
     bool presented = renderer_texture_presented(st.rt.color[0]);
     if (!presented && tb != ui_scene_rt) return;
     if (!pr->fi->ntex) return;  // (an untextured fill: a fade, not the interface)
-    // reading a scaled render target: the scene's composite, not the interface (the interface's own 2x images and the
-    // high-resolution text cache are scaled too, and are the interface: runtime/ui2x.c, font_hires.c)
+    // reading a scalable render target: the scene's composite, not the interface (the interface's own 2x images and the
+    // high-resolution text cache are scaled too, but not scalable: runtime/ui2x.c, font_hires.c). At any scale - at the
+    // game's own size (1) the copy was made before the composite and the mask covered the whole image: every
+    // in-between image of the optical flow was N's
     for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
         NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
         TexBackend *b = t ? t->backend : NULL;
-        if (b && b->scalable && (b->sx != 1 || b->sy != 1)) {
+        if (b && b != tb && b->scalable) {
             if (presented && b->width == tb->width && b->height == tb->height)  // (the last pass: its input, at this size)
                 ui_final_src = ui_scene_rt = b, ui_final_frame = fr;
             return;
