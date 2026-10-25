@@ -19,4 +19,6 @@ void fsr3_jitter(uint32_t rw, uint32_t ow, uint64_t frame, float *jx, float *jy)
 // records the upscale into cb (outside any rendering); false: not done (use FSR 1)
 bool fsr3_dispatch(VkCommandBuffer cb, const Fsr3Dispatch *d);
 void fsr3_shutdown(void);
+// OptiScaler is injected (winmm.dll next to the exe, or LARECOMP_FSR3_OPTISCALER=1) and takes the FFX calls - fsr3.cpp
+bool fsr3_optiscaler(void);
 

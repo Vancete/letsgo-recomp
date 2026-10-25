@@ -22,6 +22,15 @@
   when the window images held for later run out (the driver gives 8): at 4K and 60 fps, 4x went 2 - 3 images to a
   refresh, 2x is on time 92 % of the intervals. Research: `LARECOMP_FLOW_MATCH`, `_RADIUS`, `_OCCLUSION`, `_SHARP`,
   `_DEBUG` (docs/DEPURACAO.md).
+- **FSR 4 through OptiScaler (research)**: `LARECOMP_FSR3_OPTISCALER=1` lets OptiScaler 10 (as winmm.dll) hand the FFX
+  calls to the AMD Vulkan driver's FSR 4.1.2 (amdvkffx64.dll of Adrenalin 26.10.1 next to it, `UpscalerIndex=2`): its
+  INT8 Lite model runs on an RTX 5070 Ti. 4K Performance, the user's settings: the pass 3.1 ms against FSR 3.1's 1.7
+  (the present 7.8 ms against 6.5), detail 16.2 / 7.8 / 7.7 against 10.5 / 5.8 / 5.4 (fence / trees / bush; the
+  native SMAA image 9.0 / 6.6 / 5.5), clean edges where FSR 3.1 left dark fringes. The switch works around OptiScaler
+  10.0.0-pre1 destroying the last dispatch's mask view twice when a dispatch comes without one (the NVIDIA driver
+  crashed after loading screens): a mask every frame, the inputs in images of its own. docs/DEPURACAO.md has the setup.
+- **Crash reports list the faulting thread's stack**: the words on it that point into a loaded module (a crash inside
+  a driver or an injected dll now shows who called).
 - **Frame generation "Auto" keeps its level when the display's refresh reads wrong for a moment** (the compositor's
   timing read 206 - 222 Hz at 240 now and then with images presented in bursts): another refresh only after it holds
   for 60 presents; each reading had started the levels again from 4x.

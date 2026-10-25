@@ -5131,6 +5131,7 @@ static TexBackend *ip_ui_keep(VkCommandBuffer cb, TexBackend *in, TexBackend *ni
 // size in the window (its crop is drawn into the viewport).
 static double post_last_ow, post_last_oh;  // the output size post_process was last asked for
 static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_d, double oh_d, TexBackend **res);
+static TexBackend *hold_copy_into(TexBackend *d, TexBackend *src);
 static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, double oh_d) {
     return post_process_ex(cb, b, ow_d, oh_d, NULL);
 }
@@ -5216,6 +5217,11 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
         // an in-between image (frame interpolation): resolved against N's FSR 3.1 output instead - FSR's history goes on
         // with the real frames only (side_resolve.frag, post image 30); it needs neither the depth copy nor the mask
         TexBackend *nh = ip_side_post ? ip_n_post(ow, oh) : NULL;
+        // (OptiScaler injected, LARECOMP_FSR3_OPTISCALER=1: the image copied into one of ours that lives on. OptiScaler
+        // keeps the image views of a dispatch until the next one, and through a loading screen or a menu - no dispatch
+        // - the game freed its own image: destroying the view later, the NVIDIA driver jumped into freed memory)
+        static TexBackend fsr_in;
+        if (!nh && fsr3_optiscaler()) in = hold_copy_into(&fsr_in, in);
         TexBackend *dr = nh ? NULL : post_image_fmt(23, b->width, b->height, VK_FORMAT_R32_SFLOAT);
         TexBackend *out = post_image_fmt(24, ow, oh, VK_FORMAT_R8G8B8A8_UNORM);
         TexBackend *mv = post_image_fmt(8, ao.depth->width, ao.depth->height, VK_FORMAT_R16G16B16A16_SFLOAT);
@@ -5231,6 +5237,28 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
         VkImage mask = VK_NULL_HANDLE;
         TexBackend *mt = nh ? NULL : ui_mask_build(cb, b, fr);
         if (mt) mask = mt->image, cb = vk_cmd();  // (a dump submits the command buffer)
+        // (OptiScaler: the motion vectors and the mask copied too - post images 8 and 26 are made again at another size
+        // by the frames without FSR 3.1 in between, a menu or another scene's depth. And once a mask was given, one every
+        // frame - cleared where there is none: OptiScaler 10.0.0-pre1 destroys the last dispatch's mask view without
+        // forgetting it, and a dispatch without a mask left it to be destroyed again at the next one - the crash in the
+        // NVIDIA driver (FSR2_Vk.cpp, fsrTransparencyView), right after a loading screen or a menu)
+        static TexBackend fsr_mv, fsr_mask;
+        if (!nh && fsr3_optiscaler()) {
+            mv = hold_copy_into(&fsr_mv, mv);
+            if (mt) mask = hold_copy_into(&fsr_mask, mt)->image;
+            else if (fsr_mask.image && fsr_mask.width == b->width && fsr_mask.height == b->height) {
+                VkCommandBuffer c2 = vk_cmd();
+                vk_barrier(c2, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                           VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+                VkClearColorValue zero = {{0}};
+                VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                vkCmdClearColorImage(c2, fsr_mask.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &rg);
+                vk_barrier(c2, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+                mask = fsr_mask.image;
+            }
+            cb = vk_cmd();
+        }
         gp_mark(cb, "ours: FSR 3.1%s", ip_side_post ? " side resolve (in-between)" : "");
         Fsr3Dispatch d = {.color = in->image, .depth = dr ? dr->image : VK_NULL_HANDLE, .mv = mv->image, .mask = mask, .output = out->image,
                           .rw = b->width, .rh = b->height, .ow = ow, .oh = oh, .mvw = mv->width, .mvh = mv->height,

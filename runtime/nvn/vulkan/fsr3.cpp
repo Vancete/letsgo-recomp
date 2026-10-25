@@ -160,6 +160,29 @@ extern "C" bool fsr3_dispatch(VkCommandBuffer cb, const Fsr3Dispatch *in) {
 #endif
 }
 
+// LARECOMP_FSR3_OPTISCALER=1 (research): OptiScaler 10 injected as winmm.dll takes the FFX calls and can hand them to
+// the AMD Vulkan driver's FSR 4 (amdvkffx64.dll next to it: FSR 4.1.2's INT8 Lite model runs on other GPUs too).
+// exec.c post_process_ex then hands it images of its own that live on, and a mask every frame (OptiScaler keeps a
+// dispatch's image views until the next one)
+// On by itself when a winmm.dll is loaded from the exe's folder (OptiScaler's setup puts it there; Windows' own is in
+// System32): without the switch, OptiScaler crashed the NVIDIA driver after the first loading screen. =0 / =1 force it.
+extern "C" bool fsr3_optiscaler(void) {
+    static int on = -1;
+    if (on >= 0) return on > 0;
+    const char *e = getenv("LARECOMP_FSR3_OPTISCALER");
+    on = e ? atoi(e) != 0 : 0;
+#ifdef _WIN32
+    char dll[MAX_PATH], exe[MAX_PATH];
+    HMODULE m = GetModuleHandleA("winmm.dll");
+    if (!e && m && GetModuleFileNameA(m, dll, sizeof dll) && GetModuleFileNameA(NULL, exe, sizeof exe)) {
+        char *a = strrchr(dll, '\\'), *b = strrchr(exe, '\\');
+        if (a && b && a - dll == b - exe && !_strnicmp(dll, exe, (size_t)(a - dll))) on = 1;
+    }
+#endif
+    if (on) LOG("[fsr3] OptiScaler mode%s: inputs in images of their own, a mask every frame\n", e ? " (LARECOMP_FSR3_OPTISCALER)" : " (winmm.dll next to the exe)");
+    return on > 0;
+}
+
 extern "C" void fsr3_shutdown(void) {
 #ifdef _WIN32
     if (ctx) { vkDeviceWaitIdle(g_vk.dev); fx.DestroyContext(&ctx, NULL); ctx = NULL; }

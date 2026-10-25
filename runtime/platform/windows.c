@@ -332,6 +332,17 @@ static LONG WINAPI unhandled_filter(EXCEPTION_POINTERS *ep) {
     MEMORY_BASIC_INFORMATION mi;
     if (VirtualQuery((void *)(uintptr_t)ep->ContextRecord->Rsp, &mi, sizeof mi) && mi.State == MEM_COMMIT)
         lr = *(uint64_t *)(uintptr_t)ep->ContextRecord->Rsp;
+    // The faulting thread's stack (the backtrace below is the handler's own): the words on it that point into a
+    // loaded module - its return addresses, among others. A crash inside a driver or an injected dll shows who called.
+    if (lr && mi.State == MEM_COMMIT) {
+        uint64_t *sp = (uint64_t *)(uintptr_t)ep->ContextRecord->Rsp, end = (uint64_t)(uintptr_t)mi.BaseAddress + mi.RegionSize;
+        fprintf(stderr, "\nfaulting thread's stack (module words):\n");
+        for (int i = 0, shown = 0; i < 1024 && shown < 40 && (uint64_t)(uintptr_t)(sp + i + 1) <= end; i++) {
+            uint64_t off = 0;
+            const char *s = plat_symbol(sp[i], &off);
+            if (s) fprintf(stderr, "  [rsp+%#x] %016llx %s+%llx\n", i * 8, (unsigned long long)sp[i], s, (unsigned long long)off), shown++;
+        }
+    }
     rt_fault_report(what, fa, ep->ContextRecord->Rip, lr);
 }
 
