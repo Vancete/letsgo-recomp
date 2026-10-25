@@ -754,3 +754,27 @@ Pedido: capturar a qualquer momento da batalha, mais fácil com o selvagem fraco
   essa falha e pede a configuração de novo; no boot, `fs.c` para com uma mensagem clara em vez do 2002-6063. Testado:
   imagem cortada em 1 MB ("tables point past its end") e uma com cabeçalho IVFC param com a mensagem; a imagem boa
   segue (27818 arquivos). Não sei ainda qual era a imagem do autor da issue: pedido o tamanho dela e de onde veio.
+
+## 60 fps: o mundo dava "pulinhos" andando, e o 1 % low (25/10/2026)
+- **Relato (usuário).** Andando para os lados a 60 fps o mundo dá pulinhos para acompanhar o personagem, como se
+  dessincronizado; a 30 não acontece. O 1 % low é ruim. E um fantasma de ficha na tela de salvar (print).
+- **Medida dos pulinhos.** `LARECOMP_CAM_LOG=1` (com TAA: o log vem da câmera dos vetores de movimento), andando
+  para a direita e a esquerda em ritmo real (`--turbo 0`): a câmera anda 6,52 cm por quadro, mas uma vez por passada
+  dava −1,00 (só a parte fixa do movimento, −2 cm × 0,5: a animação não somou nada) e depois um passo duplo; a 30 fps,
+  13,04 em todo quadro. Os quadros errados caíam quando dois temporizadores de animação do jogador (`f_70005fec30`:
+  `t += taxa × passo × velocidade`, `[0,40]`) davam a volta - um quadro atrasado: `39 → 40,000 (sem volta) → 1`.
+- **Causa.** O passo do mundo a 60 fps era `1e9 / 60 = 16666666` ns (divisão inteira, `follow_setting`), que em
+  float vira um fio abaixo de 1/60: `60 × passo = 0,99999994`, e o temporizador parava em 39,99999 em vez de 40. O
+  do jogo a 30 é 33333334 (arredondado para cima): cai exato. A constante `G1_60HZ` já era 16666667, mas a troca de
+  taxa recalculava.
+- **Correção.** `g1_for(rate)` arredonda para cima (16666667 a 60, 8333334 a 120). Medido: os passos perdidos e duplos
+  no meio da caminhada sumiram (as voltas caem exatas, `39 → 0`, como a 30).
+- **Pendente.** Ao soltar o direcional a 60 fps ainda há um passo duplo (12,78 cm): começa a animação de frear
+  (`[0,170]`) e o primeiro quadro dela soma um passo a mais; a 30 a freada é 13,04 → 4,78 → 0.
+- **1 % low.** Os engasgos andando (25–30 ms) coincidem com pipelines novos: um desenho com pipeline ainda em
+  compilação espera até um orçamento por quadro (`wait_built`), fixo em 20 ms - pensado para 30 fps (27 ms de folga);
+  a 60 o quadro inteiro tem 16,7. Agora o orçamento é 60 % do quadro (20 / 10 / 5 ms a 30 / 60 / 120). Mesma
+  caminhada, segunda passada: 1 % low 40,4 → 54,6 fps, quadros acima de 22 ms 7 → 0; desenhos pulados (o objeto aparece
+  um quadro depois) 74 → 441 em ~1000 quadros.
+- **Fantasma na tela de salvar.** Não reproduzido: 200 imagens intermediárias com a tela parada e a entrada dela, sem
+  ficha duplicada (a maior diferença para o quadro real, ~400 pixels, é a animação do personagem).
