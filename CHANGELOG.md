@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.5 (2026-10-25)
+
+- **Fix: at 60 fps, the wild battle that comes back after a ball breaks ran as a menu** - at 60 with in-between
+  images, and its menus flickered. It now stays at 30 fps like every battle.
+
 ## 0.7.4 (2026-10-25)
 
 - **Fix: walking at 60 / 120 fps, the world gave little jumps** once per stride: the world's time step was a hair short
