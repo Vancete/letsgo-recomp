@@ -136,7 +136,9 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "smaa")) g_settings.antialias = atoi(val) != 0 ? AA_SMAA : AA_OFF;
     // (after "smaa" in the file: the choice among the three; "smaa" stays for older versions)
     else if (!strcmp(key, "aa"))
-        g_settings.antialias = !strcmp(val, "fsr3") ? AA_FSR3 : !strcmp(val, "taa") ? AA_TAA : !strcmp(val, "smaa") ? AA_SMAA : AA_OFF;
+        g_settings.antialias = !strcmp(val, "fsr3") ? AA_FSR3 : !strcmp(val, "gsr2") ? AA_GSR2 : !strcmp(val, "porysr") ? AA_PORY :
+                               !strcmp(val, "taa") ? AA_TAA :
+                               !strcmp(val, "smaa") ? AA_SMAA : AA_OFF;
     else if (!strcmp(key, "taa_sharpness")) g_settings.taa_sharpness = (float)atof(val);
     else if (!strcmp(key, "fsr3_sharpness")) g_settings.fsr3_sharpness = (float)atof(val);
     else if (!strcmp(key, "fsr3_preset"))
@@ -217,9 +219,10 @@ void settings_apply_levels(void) {
         g_settings.gi_rays = gi_rays[g], g_settings.gi_steps = gi_steps[g], g_settings.gi_div = gi_div[g];
         g_settings.gi_intensity = 2.0f, g_settings.gi_radius = 300.0f, g_settings.gi_thickness = 25.0f, g_settings.gi_temporal = true;
     }
-    if (g_settings.antialias < AA_OFF || g_settings.antialias > AA_FSR3) g_settings.antialias = AA_SMAA;
+    if (g_settings.antialias < AA_OFF || g_settings.antialias > AA_PORY) g_settings.antialias = AA_SMAA;
     if (g_settings.upscaler_pick != UPSCALE_GSR) g_settings.upscaler_pick = UPSCALE_BILINEAR;
-    g_settings.upscaler = g_settings.antialias == AA_FSR3 ? UPSCALE_FSR3 : g_settings.upscaler_pick;
+    g_settings.upscaler = g_settings.antialias == AA_FSR3 ? UPSCALE_FSR3 : g_settings.antialias == AA_GSR2 ? UPSCALE_GSR2 :
+                          g_settings.antialias == AA_PORY ? UPSCALE_PORY : g_settings.upscaler_pick;
     if (g_settings.frame_gen != FG_AUTO && (g_settings.frame_gen < 2 || g_settings.frame_gen > 4)) g_settings.frame_gen = 0;
     if (g_settings.fg_method != FG_FLOW) g_settings.fg_method = FG_RERENDER;
 }
@@ -279,7 +282,9 @@ void settings_save(void) {
     fprintf(f, "fps = %d\n", g_settings.fps);
     fprintf(f, "render_height = %d\n", g_settings.res_height);
     fprintf(f, "smaa = %d\n", g_settings.antialias != AA_OFF);
-    fprintf(f, "aa = %s\n", g_settings.antialias == AA_FSR3 ? "fsr3" : g_settings.antialias == AA_TAA ? "taa" :
+    fprintf(f, "aa = %s\n", g_settings.antialias == AA_FSR3 ? "fsr3" : g_settings.antialias == AA_GSR2 ? "gsr2" :
+                            g_settings.antialias == AA_PORY ? "porysr" :
+                            g_settings.antialias == AA_TAA ? "taa" :
                             g_settings.antialias == AA_SMAA ? "smaa" : "off");
     fprintf(f, "upscaler = %s\n", g_settings.upscaler_pick == UPSCALE_GSR ? "gsr" : "bilinear");  // (FSR 3.1: "aa")
     fprintf(f, "taa_sharpness = %.2f\n", g_settings.taa_sharpness);

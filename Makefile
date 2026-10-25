@@ -100,6 +100,11 @@ EXE      := $(B)/libmain.so
 OSFLAGS  += -DANDROID
 LDFLAGS  := -shared -fuse-ld=lld -Wl,-soname,libmain.so -Wl,-Bsymbolic -L$(DEPS)/lib -lSDL3 -lavformat -lavcodec \
             -lswscale -lswresample -lavutil -lshaderc_combined -nostdlib++ -lc++_shared -lvulkan -landroid -llog -ldl -lm
+# FSR 3.1: the FidelityFX SDK built from its sources (make ffx-android: tools/build_ffx_android.sh), linked in when made -
+# without it FSR 3.1 falls back to FSR 1 as before
+FFX_LIB  := $(wildcard $(DEPS)/lib/libffx_fsr3.a)
+LDFLAGS  += $(if $(FFX_LIB),-lffx_fsr3)
+$(B)/rt/nvn/vulkan/fsr3.o: CXXFLAGS += $(if $(FFX_LIB),-DLARECOMP_FFX_STATIC)
 # (-Bsymbolic: FFmpeg's AArch64 assembly reaches its tables directly, which a shared library allows only for its own symbols)
 GAMELIB  := $(B)/liblasgame.so
 GAMELIB_LDFLAGS := -shared -fuse-ld=lld -Wl,-soname,liblasgame.so -L$(B) -lmain  # (the runtime's functions: libmain.so's)
@@ -243,6 +248,8 @@ deps-windows:
 	tools/build_deps_windows.sh
 deps-android:
 	TMPDIR=/tmp bash tools/build_deps_android.sh
+ffx-android:
+	bash tools/build_ffx_android.sh
 dist:
 	@[ -f build/deps-win/lib/libavcodec.dll.a ] || { echo "make deps-windows first (LGPL FFmpeg)"; exit 1; }
 	@[ -d build/helper/lasgen ] || { echo "make gen-helper first (the game code generator)"; exit 1; }
@@ -284,4 +291,4 @@ gen-helper:
 jogo:
 	tools/publicar_jogo.sh
 
-.PHONY: all gen gen-objs runtime-objs dist deps-windows deps-android gen-helper jogo
+.PHONY: all gen gen-objs runtime-objs dist deps-windows deps-android ffx-android gen-helper jogo

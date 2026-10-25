@@ -26,6 +26,9 @@ export ANDROID_NDK=/c/Users/<you>/Android/ndk/29 ANDROID_SDK=/c/Users/<you>/Andr
 
 # 1. the libraries the runtime links against (once): FFmpeg, SDL3 (and its Java side), shaderc, VMA -> build/deps-android
 make deps-android     # (tools/build_deps_android.sh)
+# (optional) FSR 3.1: AMD's FidelityFX SDK built from its sources -> build/deps-android/lib/libffx_fsr3.a, linked in
+# when present (without it FSR 3.1 falls back to FSR 1)
+make ffx-android      # (tools/build_ffx_android.sh)
 
 # 2. the game code for Android (once per game / generator change): generated-android/, then build/android/liblasgame.so
 make TARGET=android gen
@@ -171,6 +174,31 @@ one pass in the present's draw, ~0.3 ms a frame at the phone's 2133x1200 - 720p 
 halves the main pass. Next levers: half precision in the materials (their ~44 texture reads keep occupancy at 15%);
 the game's 60 fps mode; clear-only passes as the next pass's load (~5%).
 
+## Temporal upscalers on a phone
+
+Both take the jittered scene at a render size from their mode (Native AA 1.0x to Ultra Performance 3.0x), its depth,
+the motion vectors and the interface mask (exec.c post_process_ex). Measured on the Adreno 830, the display's 16:9 box
+2133x1200, Performance (1067x600), the frame's GPU time from first to last timestamp:
+
+| | frame | the upscaler |
+|---|---|---|
+| SMAA, 1067x600, bilinear | 18.1 ms | - |
+| SMAA, 1280x720, bilinear | 20.9 ms | - |
+| FSR 3.1 Performance | 22.3 ms | ~4 - 5 ms |
+| Snapdragon GSR 2 Performance | 21.6 ms | 3.4 ms |
+
+- **FSR 3.1**: the FidelityFX SDK 1.1.4 (MIT) built for arm64 by `make ffx-android` (tools/build_ffx_android.sh: a
+  sparse clone of the pinned release, tools/ffx_android/patch_sdk.py for what it takes from MSVC and Windows, the passes'
+  SPIR-V made with the SDK's own FidelityFX_SC and glslang). The backend picks its 16-bit variants (the device enables
+  `shaderFloat16`); the Adreno reports 64-wide waves only, so no wave64 variants. On a tiler its compute passes'
+  timestamps don't split the time between them (the last pass's row takes ~9 ms of work done before it), so the cost
+  above is the frame against SMAA at the same render size.
+- **Snapdragon GSR 2** (Qualcomm, BSD 3-Clause; `aa = gsr2`): its 2-pass fragment variant (shaders.c gsr2_*.frag), the
+  upscale in half precision as Qualcomm's - in full precision it took 2.5 ms instead of 1.45 - with a 10-bit history
+  (gsr2_run), then our RCAS and the interface composite in one pass (two passes: 1 ms each).
+- With frame generation (re-rendering, 2x) both hold 60 images a second, the game at 30: the in-between images are
+  resolved against frame N's upscaled output (side_resolve.frag), the upscaler's history goes on with the real frames.
+
 ## Frame generation on a phone
 
 - The display: Android keeps an app at 60 Hz unless it asks, so 3x / 4x at 30 fps (90 / 120 images a second) were drawn
@@ -191,5 +219,4 @@ the game's 60 fps mode; clear-only passes as the next pass's load (~5%).
 ## Known gaps
 
 - No touch controls; a controller is needed.
-- FSR 3.1 is PC-only (its library): chosen on Android it falls back to FSR 1. Frame generation is untested there.
 - The APK is signed with a debug key and is debuggable.

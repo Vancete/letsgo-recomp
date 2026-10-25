@@ -168,8 +168,14 @@ static void create_device(void) {
     // device lacks fails vkCreateDevice (VK_ERROR_FEATURE_NOT_PRESENT)
     VkPhysicalDeviceCustomBorderColorFeaturesEXT have_cbc = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT};
     VkPhysicalDeviceFaultFeaturesEXT have_ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
-    VkPhysicalDeviceVulkan12Features have12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    VkPhysicalDeviceVulkan13Features have13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    VkPhysicalDeviceVulkan12Features have12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &have13};
     VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have12};
+    // (compute shader derivatives - the NV extension's structure: the KHR one has the same type value)
+    const char *deriv_ext = has_ext(ep, ne, "VK_KHR_compute_shader_derivatives") ? "VK_KHR_compute_shader_derivatives" :
+                            has_ext(ep, ne, VK_NV_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME) ? VK_NV_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME : NULL;
+    VkPhysicalDeviceComputeShaderDerivativesFeaturesNV have_deriv = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_NV};
+    if (deriv_ext) have_deriv.pNext = have.pNext, have.pNext = &have_deriv;
     if (has_ext(ep, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME)) have_cbc.pNext = have.pNext, have.pNext = &have_cbc;
     if (has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) have_ff.pNext = have.pNext, have.pNext = &have_ff;
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
@@ -192,6 +198,9 @@ static void create_device(void) {
     if (g_pipe_exec_stats) ext[n_ext++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
     else if (getenv("LARECOMP_PIPE_STATS")) LOG("[vk] LARECOMP_PIPE_STATS: the driver has no VK_KHR_pipeline_executable_properties\n");
     g_fault_ext = fault;
+    // (compute shaders of machine-learning upscalers: derivatives in groups of quads; with 8-bit dot products, below)
+    bool deriv = deriv_ext && have_deriv.computeDerivativeGroupQuads;
+    if (deriv) ext[n_ext++] = deriv_ext;
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
@@ -204,13 +213,15 @@ static void create_device(void) {
     VkPhysicalDeviceVulkan13Features f13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                                             .dynamicRendering = VK_TRUE, .synchronization2 = VK_TRUE,
                                             .shaderDemoteToHelperInvocation = VK_TRUE, .shaderTerminateInvocation = VK_TRUE,
-                                            .maintenance4 = VK_TRUE,
+                                            .maintenance4 = VK_TRUE, .shaderIntegerDotProduct = have13.shaderIntegerDotProduct,
                                             .pNext = g_vk.custom_border ? (void *)&cbc : g_vk.divisor ? (void *)&div : NULL};
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                             .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
                                             // (8-bit uniform buffers: no shader of ours uses them; Adreno has none)
                                             .uniformAndStorageBuffer8BitAccess = have12.uniformAndStorageBuffer8BitAccess,
                                             .storageBuffer8BitAccess = VK_TRUE,
+                                            // (FSR 3.1's 16-bit shader variants, which it picks where the GPU has them)
+                                            .shaderFloat16 = have12.shaderFloat16,
                                             .scalarBlockLayout = VK_TRUE, .bufferDeviceAddress = g_vk.heap_export, .pNext = &f13};
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
@@ -226,6 +237,10 @@ static void create_device(void) {
     VkPhysicalDevicePresentIdFeaturesKHR pid = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR,
                                                 .presentId = VK_TRUE, .pNext = &pw};
     if (g_present_log) f.pNext = &pid;
+    VkPhysicalDeviceComputeShaderDerivativesFeaturesNV dq = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_NV,
+                                                             .computeDerivativeGroupQuads = VK_TRUE, .pNext = f.pNext};
+    if (deriv) f.pNext = &dq;
+    LOG("[vk] 8-bit dot products %s, compute derivatives %s\n", have13.shaderIntegerDotProduct ? "on" : "no", deriv ? deriv_ext : "no");
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
     b->dualSrcBlend = h->dualSrcBlend;
@@ -719,6 +734,13 @@ static bool shot_raw(const char *path, const uint8_t *rgba, uint32_t w, uint32_t
 
 void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h) {
     if (shot_raw(path, rgba, w, h)) return;
+#ifdef __ANDROID__
+    // (SDL opens a relative path among the APK's assets on Android: the shots go under the data root instead, the
+    // folder the runtime works in)
+    extern const char *rt_data_root(void);
+    char abs[1024];
+    if (path[0] != '/' && rt_data_root()) snprintf(abs, sizeof abs, "%s/%s", rt_data_root(), path), path = abs;
+#endif
     SDL_Surface *s = SDL_CreateSurfaceFrom((int)w, (int)h, SDL_PIXELFORMAT_ABGR8888, (void *)rgba, (int)w * 4);
     if (!s || !SDL_SavePNG(s, path)) LOG("[vk] saving %s failed: %s\n", path, SDL_GetError());
     else LOG("[vk] saved %s (%ux%u)\n", path, w, h);

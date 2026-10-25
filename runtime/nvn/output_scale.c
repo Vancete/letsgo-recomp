@@ -81,8 +81,9 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
     double h;
     int mode = g_settings.res_mode;
     if (forced > 0) h = forced;
-    // FSR 3.1: the window's resolution divided by its preset's ratio (the launcher's choice does not apply)
-    else if (g_settings.upscaler == UPSCALE_FSR3) h = (reshape ? dh / 1080.0 : fit) / settings_fsr3_ratio();
+    // FSR 3.1, GSR 2, PorySR: the window's resolution divided by its preset's ratio (the launcher's choice does not apply)
+    else if (g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_GSR2 || g_settings.upscaler == UPSCALE_PORY)
+        h = (reshape ? dh / 1080.0 : fit) / settings_fsr3_ratio();
     else if (g_settings.res_height > 0) h = g_settings.res_height / 1080.0;  // (the launcher's choice)
     else if (mode >= 1 && mode <= 8) h = mode;
     else {

@@ -12,6 +12,7 @@
 extern "C" {
 #include "../paths.h"
 #include "../settings.h"
+bool porysr_present(void);  // runtime/nvn/vulkan/fsr3.cpp (a local test upscaler's data is there)
 }
 
 // ------------------------------------------------------------------ language
@@ -560,20 +561,23 @@ void ui_page_graphics(float x, bool known) {
                 "Края теней: как рисует игра, сглаженные или ещё мягче."));
     ui_group_gap();
     // anti-aliasing: SMAA on the final image (the interface too), TAA on the scene (jittered, motion vectors:
-    // runtime/nvn/vulkan/exec.c taa_run) or FSR 3.1 (temporal, the interface masked: exec.c, fsr3.cpp), the last one
-    // upscaling too, with its mode below. With the others a lower internal resolution is scaled bilinearly
-    // (settings_apply_levels).
+    // runtime/nvn/vulkan/exec.c taa_run), FSR 3.1 (temporal, the interface masked: exec.c, fsr3.cpp) or Snapdragon GSR 2
+    // (temporal, Qualcomm's: exec.c gsr2_run), the last two upscaling too, with their mode below. With the others a lower
+    // internal resolution is scaled bilinearly or by GSR 1 (settings_apply_levels).
     {
-        const char *aa[] = {UI_T("Off", "Desligado", "Выкл."), "SMAA", "TAA", "FSR 3.1"};
+        // (PorySR, a local test upscaler: offered only where its data is - runtime/nvn/vulkan/fsr3.cpp porysr_present)
+        const char *aa[] = {UI_T("Off", "Desligado", "Выкл."), "SMAA", "TAA", "FSR 3.1", "Snapdragon GSR 2", "PorySR (test)"};
+        static int pory = -1;
+        if (pory < 0) pory = porysr_present();
         ui_row(l[4], x);
-        if (ui_combo("##aa", &g_settings.antialias, aa, 4)) settings_apply_levels();
-        ui_tip(UI_T("Smooths jagged edges. SMAA: light, on the final image. TAA and FSR 3.1: steadier, over several frames; FSR 3.1 also draws the scene at a lower resolution and upscales it.",
-                    "Suaviza os serrilhados. SMAA: leve, na imagem final. TAA e FSR 3.1: mais estáveis, ao longo de vários quadros; o FSR 3.1 também desenha a cena numa resolução menor e a amplia.",
-                    "Сглаживает зубчатые края. SMAA: лёгкое, на итоговом кадре. TAA и FSR 3.1: стабильнее, по нескольким кадрам; FSR 3.1 ещё и рисует сцену в меньшем разрешении и увеличивает её."));
+        if (ui_combo("##aa", &g_settings.antialias, aa, pory || g_settings.antialias == AA_PORY ? 6 : 5)) settings_apply_levels();
+        ui_tip(UI_T("Smooths jagged edges. SMAA: light, on the final image. TAA, FSR 3.1 and GSR 2: steadier, over several frames; FSR 3.1 and GSR 2 also draw the scene at a lower resolution and upscale it (GSR 2: Qualcomm's, lighter on phones).",
+                    "Suaviza os serrilhados. SMAA: leve, na imagem final. TAA, FSR 3.1 e GSR 2: mais estáveis, ao longo de vários quadros; o FSR 3.1 e o GSR 2 também desenham a cena numa resolução menor e a ampliam (GSR 2: da Qualcomm, mais leve em celulares).",
+                    "Сглаживает зубчатые края. SMAA: лёгкое, на итоговом кадре. TAA, FSR 3.1 и GSR 2: стабильнее, по нескольким кадрам; FSR 3.1 и GSR 2 ещё и рисуют сцену в меньшем разрешении и увеличивают её (GSR 2 от Qualcomm легче для телефонов)."));
     }
-    // How a render resolution below the window's reaches it without FSR 3.1: bilinear, or Snapdragon GSR 1 in the
-    // present's draw (exec.c vk_present_draw, settings_apply_levels)
-    if (g_settings.antialias != AA_FSR3) {
+    // How a render resolution below the window's reaches it without a temporal upscaler: bilinear, or Snapdragon GSR 1
+    // in the present's draw (exec.c vk_present_draw, settings_apply_levels)
+    if (!AA_TEMPORAL_UPSCALE(g_settings.antialias)) {
         const char *up[] = {UI_T("Bilinear", "Bilinear", "Билинейное"), "Snapdragon GSR"};
         int u = g_settings.upscaler_pick == UPSCALE_GSR;
         ui_row(l[8], x);
@@ -585,26 +589,32 @@ void ui_page_graphics(float x, bool known) {
                     "Когда сцена рисуется ниже разрешения экрана: Snapdragon GSR (Game Super Resolution от Qualcomm) "
                     "сохраняет края и детали чётче билинейного, с небольшой нагрузкой на GPU."));
     }
-    // FSR 3.1's presets: the render resolution is the window's divided by the ratio (runtime/nvn/output_scale.c)
-    if (g_settings.antialias == AA_FSR3) {
+    // FSR 3.1's presets (GSR 2's too): the render resolution is the window's divided by the ratio (runtime/nvn/output_scale.c)
+    if (AA_TEMPORAL_UPSCALE(g_settings.antialias)) {
+        bool gsr2 = g_settings.antialias == AA_GSR2;  // (PorySR: FSR 3.1's labels - it takes its modes)
         const char *pr[] = {UI_T("Native AA (1.0x)", "AA nativo (1,0x)", "Нативное AA (1,0x)"),
                             UI_T("Quality (1.5x)", "Qualidade (1,5x)", "Качество (1,5x)"),
                             UI_T("Balanced (1.7x)", "Equilibrado (1,7x)", "Баланс (1,7x)"),
                             UI_T("Performance (2.0x)", "Desempenho (2,0x)", "Производительность (2,0x)"),
                             UI_T("Ultra Performance (3.0x)", "Ultra desempenho (3,0x)", "Макс. производительность (3,0x)")};
-        ui_row(l[5], x);
+        ui_row(gsr2 ? UI_T("GSR 2 mode", "Modo do GSR 2", "Режим GSR 2") : l[5], x);
         ui_combo("##fsr3p", &g_settings.fsr3_preset, pr, 5);
-        ui_tip(UI_T("How much lower the scene is drawn before FSR 3.1 upscales it: the window's size divided by the ratio. Higher ratios run faster and look softer.",
-                    "Quanto menor a cena é desenhada antes de o FSR 3.1 ampliá-la: o tamanho da janela dividido pela razão. Razões maiores rodam mais rápido e ficam mais suaves.",
-                    "Во сколько раз меньше рисуется сцена перед увеличением FSR 3.1: размер окна, делённый на коэффициент. Больший коэффициент быстрее, но мягче."));
+        if (gsr2)
+            ui_tip(UI_T("How much lower the scene is drawn before GSR 2 upscales it: the window's size divided by the ratio. Higher ratios run faster and look softer.",
+                        "Quanto menor a cena é desenhada antes de o GSR 2 ampliá-la: o tamanho da janela dividido pela razão. Razões maiores rodam mais rápido e ficam mais suaves.",
+                        "Во сколько раз меньше рисуется сцена перед увеличением GSR 2: размер окна, делённый на коэффициент. Больший коэффициент быстрее, но мягче."));
+        else
+            ui_tip(UI_T("How much lower the scene is drawn before FSR 3.1 upscales it: the window's size divided by the ratio. Higher ratios run faster and look softer.",
+                        "Quanto menor a cena é desenhada antes de o FSR 3.1 ampliá-la: o tamanho da janela dividido pela razão. Razões maiores rodam mais rápido e ficam mais suaves.",
+                        "Во сколько раз меньше рисуется сцена перед увеличением FSR 3.1: размер окна, делённый на коэффициент. Больший коэффициент быстрее, но мягче."));
         // its sharpening: RCAS, AMD's robust contrast-adaptive sharpening (CAS) inside FSR 3.1 (exec.c post_process; the
-        // frame generation's in-between images take it too)
+        // frame generation's in-between images take it too) - after GSR 2, the same pass of ours (rcas.frag)
         float pct = g_settings.fsr3_sharpness * 100;
         ui_row(l[7], x);
         if (ui_slider("##fsr3s", &pct, 0, 100, "%.0f%%", 5)) g_settings.fsr3_sharpness = pct / 100;
-        ui_tip(UI_T("FSR 3.1's own sharpening (RCAS, AMD's contrast-adaptive sharpening). 0% turns it off.",
-                    "A nitidez do próprio FSR 3.1 (RCAS, o realce adaptativo de contraste da AMD). 0% desliga.",
-                    "Собственная резкость FSR 3.1 (RCAS, адаптивное повышение резкости AMD). 0% — выкл."));
+        ui_tip(UI_T("The upscaler's sharpening (RCAS, AMD's contrast-adaptive sharpening). 0% turns it off.",
+                    "A nitidez do ampliador (RCAS, o realce adaptativo de contraste da AMD). 0% desliga.",
+                    "Резкость апскейлера (RCAS, адаптивное повышение резкости AMD). 0% — выкл."));
     }
     // Frame generation (exec.c frame interpolation): 2, 3 or 4 images per world frame, the in-between ones drawn by
     // running the frame's draws again with their positions between the last frame's and this one's; Auto: as many as the

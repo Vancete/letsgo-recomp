@@ -1105,6 +1105,182 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(mix(c, hc, pc.b.x), 1.0);\n"
                "}\n";
     }
+    // ---- Snapdragon GSR 2 (Qualcomm's Game Super Resolution 2, third_party/snapdragon-gsr/LICENSE.txt: BSD 3-Clause), its 2-pass
+    // fragment variant (sgsr/v2/include/glsl_2_pass_fs) for exec.c gsr2_run: the parameters as push constants instead of
+    // its uniform buffer, gl_FragCoord instead of the vertex shader's uv, and our motion vectors (this frame's uv - the
+    // previous one's, camera and objects: mv_run) instead of its clip-space velocity texture - its motion is in NDC, 2 x
+    // ours, the previous uv uv - 0.5 x motion.
+    // a.xy = render size, a.zw = output size, b.xy = 1 / render size, b.zw = 1 / output size, c.xy = the jitter (render
+    // pixels, Halton(2, 3) - 0.5), c.zw = scaleRatio (output / render width, min(20, (output / render area)^3)),
+    // d.x = tan(horizontal fov / 2), d.y = minLerpContribution (0.3 with the camera still 5 frames), d.z = reset.
+    // gsr2_convert.frag (render size, RGBA16F): xy = the motion (NDC), z = depth clip (how far this pixel's depth stands
+    // out from its 4x4 neighbourhood's: its history is less trusted). t0 = depth (1: far), t1 = our motion vectors.
+    // gsr2_upscale.frag (output size, the history ping-pong): t0 = the previous output, t1 = the convert pass's,
+    // t2 = the colour (render size, fetched); a Lanczos-like 5-tap upsample, the history clamped to their box.
+    if (!strcmp(name, "gsr2_convert.frag") || !strcmp(name, "gsr2_upscale.frag")) {
+        *stage = STAGE_FRAGMENT;
+        static const char *common =
+            "#version 450\n"
+            "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; } pc;\n"
+            "layout(location = 0) out vec4 o;\n";
+        static const char *convert =
+            "layout(set = 0, binding = 0) uniform sampler2D InputDepth;\n"
+            "layout(set = 0, binding = 1) uniform sampler2D InputVelocity;\n"
+            "void main() {\n"
+            "  vec2 renderSize = pc.a.xy, renderSizeRcp = pc.b.xy;\n"
+            "  vec2 texCoord = gl_FragCoord.xy * renderSizeRcp;\n"
+            "  vec2 gatherCoord = texCoord - vec2(0.5) * renderSizeRcp;\n"
+            "  vec4 btmLeft = textureGather(InputDepth, gatherCoord, 0);\n"
+            "  vec4 btmRight = textureGather(InputDepth, gatherCoord + vec2(renderSizeRcp.x * 2.0, 0.0), 0);\n"
+            "  vec4 topLeft = textureGather(InputDepth, gatherCoord + vec2(0.0, renderSizeRcp.y * 2.0), 0);\n"
+            "  vec4 topRight = textureGather(InputDepth, gatherCoord + renderSizeRcp * 2.0, 0);\n"
+            "  float maxC = min(min(min(btmLeft.z, btmRight.w), topLeft.y), topRight.x);\n"
+            "  float btmLeft4 = min(min(min(btmLeft.y, btmLeft.x), btmLeft.z), btmLeft.w);\n"
+            "  float depthclip = 0.0;\n"
+            "  if (maxC < 1.0 - 1.0e-05) {\n"
+            "    float btmRight4 = min(min(min(btmRight.y, btmRight.x), btmRight.z), btmRight.w);\n"
+            "    float topLeft4 = min(min(min(topLeft.y, topLeft.x), topLeft.z), topLeft.w);\n"
+            "    float topRight4 = min(min(min(topRight.y, topRight.x), topRight.z), topRight.w);\n"
+            "    float Ksep_Kfov_diagonal = 1.37e-05 * pc.d.x * length(renderSize);\n"
+            "    float Depthsep = Ksep_Kfov_diagonal * (1.0 - maxC);\n"
+            "    float Wdepth = clamp(Depthsep / (abs(maxC - btmLeft4) + 1.19e-07), 0.0, 1.0)\n"
+            "                 + clamp(Depthsep / (abs(maxC - btmRight4) + 1.19e-07), 0.0, 1.0)\n"
+            "                 + clamp(Depthsep / (abs(maxC - topLeft4) + 1.19e-07), 0.0, 1.0)\n"
+            "                 + clamp(Depthsep / (abs(maxC - topRight4) + 1.19e-07), 0.0, 1.0);\n"
+            "    depthclip = clamp(1.0 - Wdepth * 0.25, 0.0, 1.0);\n"
+            "  }\n"
+            "  ivec2 ms = textureSize(InputVelocity, 0);\n"
+            "  vec2 v = texelFetch(InputVelocity, clamp(ivec2(texCoord * vec2(ms)), ivec2(0), ms - 1), 0).xy;\n"
+            "  o = vec4(2.0 * v, depthclip, 0.0);\n"
+            "}\n";
+        // (the upscale in half precision but its coordinates, as Qualcomm's: in full precision it took 2.5 ms of an
+        // Adreno 830's frame at 2133 x 1200)
+        static const char *upscale =
+            "precision mediump float;\n"
+            "precision highp int;\n"
+            "layout(set = 0, binding = 0) uniform sampler2D PrevOutput;\n"
+            "layout(set = 0, binding = 1) uniform sampler2D MotionDepthClipAlphaBuffer;\n"
+            "layout(set = 0, binding = 2) uniform sampler2D InputColor;\n"
+            "float FastLanczos(float base) { float y = base - 1.0, y2 = y * y; return (0.75 * y + y2) * y2; }\n"
+            "void tap(vec3 c, vec2 off, float kernelbias2, float curvebias, inout vec4 cw, inout vec3 mn, inout vec3 mx,\n"
+            "         inout vec3 center, inout vec3 var, inout float bw) {\n"
+            "  float d = dot(off, off);\n"
+            "  float w = FastLanczos(clamp(d * kernelbias2, 0.0, 1.0));\n"
+            "  cw += vec4(c * w, w);\n"
+            "  float boxweight = exp(d * curvebias);\n"
+            "  mn = min(mn, c); mx = max(mx, c);\n"
+            "  vec3 ws = c * boxweight;\n"
+            "  center += ws; var += c * ws; bw += boxweight;\n"
+            "}\n"
+            "void main() {\n"
+            "  highp vec2 renderSize = pc.a.xy, outputSize = pc.a.zw, renderSizeRcp = pc.b.xy, outputSizeRcp = pc.b.zw;\n"
+            "  highp vec2 jitterOffset = pc.c.xy;\n"
+            "  float Biasmax_viewportXScale = pc.c.z, scalefactor = pc.c.w;\n"
+            "  highp vec2 Hruv = gl_FragCoord.xy * outputSizeRcp;\n"
+            "  highp vec2 Jitteruv = clamp(Hruv + jitterOffset * renderSizeRcp, 0.0, 1.0);\n"
+            "  ivec2 InputPos = ivec2(Jitteruv * renderSize);\n"
+            "  vec3 mda = textureLod(MotionDepthClipAlphaBuffer, Jitteruv, 0.0).xyz;\n"
+            "  vec2 Motion = mda.xy;\n"
+            "  highp vec2 PrevUV = clamp(-0.5 * Motion + Hruv, 0.0, 1.0);\n"
+            "  float depthfactor = mda.z;\n"
+            "  vec3 HistoryColor = textureLod(PrevOutput, PrevUV, 0.0).xyz;\n"
+            "  float biasmax = Biasmax_viewportXScale;\n"
+            "  float biasmin = max(1.0, 0.3 + 0.3 * biasmax);\n"
+            "  float kernelbias = mix(biasmax, biasmin, 0.25 * depthfactor) * 0.5;\n"
+            "  float kernelbias2 = kernelbias * kernelbias;\n"
+            "  float motion_viewport_len = length(Motion * outputSize);\n"
+            "  float curvebias = mix(-2.0, -3.0, clamp(motion_viewport_len * 0.02, 0.0, 1.0));\n"
+            "  highp vec2 srcpos = vec2(InputPos) + vec2(0.5) - jitterOffset;\n"
+            "  vec2 so = srcpos - Hruv * renderSize;\n"
+            "  ivec2 cs = textureSize(InputColor, 0) - 1;\n"
+            "  vec3 c0 = texelFetch(InputColor, clamp(InputPos + ivec2(0, 1), ivec2(0), cs), 0).xyz;\n"
+            "  vec4 cw = vec4(0.0); vec3 center = vec3(0.0), var = vec3(0.0); float bw = 0.0;\n"
+            "  vec3 mn = c0, mx = c0;\n"
+            "  tap(c0, so + vec2(0.0, 1.0), kernelbias2, curvebias, cw, mn, mx, center, var, bw);\n"
+            "  tap(texelFetch(InputColor, clamp(InputPos + ivec2(1, 0), ivec2(0), cs), 0).xyz, so + vec2(1.0, 0.0), kernelbias2, curvebias, cw, mn, mx, center, var, bw);\n"
+            "  tap(texelFetch(InputColor, clamp(InputPos + ivec2(-1, 0), ivec2(0), cs), 0).xyz, so + vec2(-1.0, 0.0), kernelbias2, curvebias, cw, mn, mx, center, var, bw);\n"
+            "  tap(texelFetch(InputColor, clamp(InputPos, ivec2(0), cs), 0).xyz, so, kernelbias2, curvebias, cw, mn, mx, center, var, bw);\n"
+            "  tap(texelFetch(InputColor, clamp(InputPos + ivec2(0, -1), ivec2(0), cs), 0).xyz, so + vec2(0.0, -1.0), kernelbias2, curvebias, cw, mn, mx, center, var, bw);\n"
+            "  bw = 1.0 / bw;\n"
+            "  center *= bw; var *= bw;\n"
+            "  var = sqrt(abs(var - center * center));\n"
+            "  cw.xyz = clamp(cw.xyz / cw.w, mn - vec3(0.075), mx + vec3(0.075));\n"
+            "  cw.w *= 1.0 / 3.0;\n"
+            "  float baseupdate = 1.0 - depthfactor;\n"
+            "  baseupdate = min(baseupdate, mix(baseupdate, cw.w * 10.0, clamp(10.0 * motion_viewport_len, 0.0, 1.0)));\n"
+            "  baseupdate = min(baseupdate, mix(baseupdate, cw.w, clamp(motion_viewport_len * 0.05, 0.0, 1.0)));\n"
+            "  float basealpha = baseupdate;\n"
+            "  float boxscale = max(depthfactor, clamp(motion_viewport_len * 0.05, 0.0, 1.0));\n"
+            "  float boxsize = mix(scalefactor, 1.0, boxscale);\n"
+            "  vec3 sboxvar = var * boxsize;\n"
+            "  mx = min(mx, center + sboxvar);\n"
+            "  mn = max(mn, center - sboxvar);\n"
+            "  vec3 clampedcolor = clamp(HistoryColor, mn, mx);\n"
+            "  float startLerpValue = (abs(mda.x) + abs(mda.y)) > 0.000001 ? 0.0 : pc.d.y;\n"
+            "  float lerpcontribution = (any(greaterThan(mn, HistoryColor)) || any(greaterThan(HistoryColor, mx))) ? startLerpValue : 1.0;\n"
+            "  HistoryColor = mix(clampedcolor, HistoryColor, clamp(lerpcontribution, 0.0, 1.0));\n"
+            "  basealpha = mix(min(basealpha, 0.1), basealpha, clamp(lerpcontribution, 0.0, 1.0));\n"
+            "  float alphasum = max(1.192e-07, basealpha + cw.w);\n"
+            "  float alpha = clamp(cw.w / alphasum + pc.d.z, 0.0, 1.0);\n"
+            "  o = vec4(alpha >= 1.0 ? cw.xyz : mix(HistoryColor, cw.xyz, alpha), 1.0);\n"  // (a reset: a new history's contents unread)
+            "}\n";
+        static char *src[2];
+        int k = !strcmp(name, "gsr2_upscale.frag");
+        if (!src[k]) {
+            const char *body = k ? upscale : convert;
+            size_t n = strlen(common) + strlen(body) + 1;
+            src[k] = malloc(n);
+            snprintf(src[k], n, "%s%s", common, body);
+        }
+        return src[k];
+    }
+    // GSR 2's output finished in one pass (exec.c post_process_ex): sharpened by RCAS (rcas.frag's, a.x its strength: 0
+    // none), then the interface composited where the mask says interface (ui_composite.frag's: t1 by Catmull-Rom).
+    // t0 = GSR 2's output, t1 = the image it was given (render size), m = the interface mask (render size; a.y = 1 when
+    // there is one). b.xy = the output's size, b.zw = 1 / it. In half precision but the coordinates (gsr2_upscale.frag's).
+    if (!strcmp(name, "gsr2_final.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "precision mediump float;\n"
+               "precision highp int;\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t0;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D t1;\n"
+               "layout(set = 0, binding = 2) uniform sampler2D m;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "vec3 tap(ivec2 p) { return texelFetch(t0, clamp(p, ivec2(0), ivec2(pc.b.xy) - 1), 0).rgb; }\n"
+               "float lum(vec3 c) { return c.g + 0.5 * (c.r + c.b); }\n"
+               "vec3 cr(highp vec2 uv) {\n"
+               "  highp vec2 sz = vec2(textureSize(t1, 0)), p = uv * sz, c1 = floor(p - 0.5) + 0.5;\n"
+               "  vec2 f = p - c1;\n"
+               "  vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f);\n"
+               "  vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f);\n"
+               "  vec2 w12 = w1 + w2;\n"
+               "  highp vec2 q0 = (c1 - 1.0) / sz, q3 = (c1 + 2.0) / sz, q12 = (c1 + w2 / w12) / sz;\n"
+               "  vec3 r = texture(t1, vec2(q12.x, q0.y)).rgb * w12.x * w0.y + texture(t1, vec2(q0.x, q12.y)).rgb * w0.x * w12.y\n"
+               "         + texture(t1, q12).rgb * w12.x * w12.y + texture(t1, vec2(q3.x, q12.y)).rgb * w3.x * w12.y\n"
+               "         + texture(t1, vec2(q12.x, q3.y)).rgb * w12.x * w3.y;\n"
+               "  float ws = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;\n"
+               "  return clamp(r / ws, 0.0, 1.0);\n"
+               "}\n"
+               "void main() {\n"
+               "  ivec2 ip = ivec2(gl_FragCoord.xy);\n"
+               "  vec3 b = tap(ip + ivec2(0, -1)), d = tap(ip + ivec2(-1, 0)), e = tap(ip), f = tap(ip + ivec2(1, 0)), h = tap(ip + ivec2(0, 1));\n"
+               "  float bL = lum(b), dL = lum(d), eL = lum(e), fL = lum(f), hL = lum(h);\n"
+               "  float nz = 0.25 * (bL + dL + fL + hL) - eL;\n"
+               "  float rng = max(max(max(bL, dL), max(eL, fL)), hL) - min(min(min(bL, dL), min(eL, fL)), hL);\n"
+               "  nz = 1.0 - 0.5 * clamp(abs(nz) / max(rng, 1.0 / 65536.0), 0.0, 1.0);\n"
+               "  vec3 mn4 = min(min(b, d), min(f, h)), mx4 = max(max(b, d), max(f, h));\n"
+               "  vec3 hitMin = min(mn4, e) / max(4.0 * mx4, vec3(1.0 / 65536.0));\n"
+               "  vec3 hitMax = (1.0 - max(mx4, e)) / min(4.0 * mn4 - 4.0, vec3(-1.0 / 65536.0));\n"
+               "  vec3 lobeRGB = max(-hitMin, hitMax);\n"
+               "  float lobe = max(-(0.25 - 1.0 / 16.0), min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0)) * pc.a.x * nz;\n"
+               "  vec3 r = (lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0);\n"
+               "  highp vec2 uv = gl_FragCoord.xy * pc.b.zw;\n"
+               "  float k = pc.a.y > 0.5 ? texture(m, uv).r : 0.0;\n"
+               "  o = vec4(k > 0.0 ? mix(r, cr(uv), k) : r, 1.0);\n"
+               "}\n";
+    }
     // FSR 3.1's output with the interface composited after it (exec.c post_process_ex): t0 = FSR's output, t1 = the image
     // it was given (the render size, the interface not jittered), m = the interface mask (render size). Where the mask
     // says interface (bilinear: its edges blend), t1 by Catmull-Rom (5 bilinear taps, as side_resolve.frag's history).

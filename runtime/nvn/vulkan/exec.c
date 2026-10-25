@@ -278,6 +278,8 @@ static void gp_mark(VkCommandBuffer cb, const char *fmt, ...) {
     gp_draws[gp_n] = 0;
     gp_n++;
 }
+// (fsr3.cpp: a row per FidelityFX dispatch in a profiled frame)
+void vk_gp_mark_str(VkCommandBuffer cb, const char *s) { gp_mark(cb, "%s", s); }
 void renderer_flush(void);
 void vk_gpuprof_report(void) {
     if (!gp_n) return;
@@ -1337,6 +1339,7 @@ static uint64_t ui_final_frame;
 static VkImageView raw_view(TexBackend *b);
 static NvnTexture *shader_texture_object(int stage, ShaderTexture *st_);
 static bool fsr3_on(void);
+static bool gsr2_on(void);
 // Mip bias of the game's own textures while TAA or FSR 3.1 resolves the image (post_process_ex, texture_info): the
 // temporal accumulation brings back the detail of a finer mip level without its shimmer - AMD's guidance for FSR,
 // log2(render / display width) - 1 (native: -1; Quality, 1.5x: -1.58); TAA at native -0.5 (its history is shorter).
@@ -1357,7 +1360,8 @@ static bool mv_wanted(void) {
     static int dump = -1;
     if (dump < 0) dump = getenv("LARECOMP_MV_DUMP") != NULL;
     return g_settings.mv_debug || dump || (g_settings.ssao && g_settings.ssao_temporal) || (g_settings.gi && g_settings.gi_temporal) ||
-           g_settings.antialias == AA_TAA || g_settings.upscaler == UPSCALE_FSR3 ||
+           g_settings.antialias == AA_TAA || g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_GSR2 ||
+           g_settings.upscaler == UPSCALE_PORY ||
            (g_settings.frame_gen && g_settings.fg_method == FG_FLOW);  // (the optical flow starts from them: flow_prepare)
 }
 
@@ -1417,7 +1421,7 @@ static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     vk_end_pass();
     // TAA: the scene is complete when the game moves on to another colour target (its bloom): resolved there, once
-    if ((jitter_on() || g_settings.upscaler == UPSCALE_FSR3) && ao.tex && ao.frame == fx_frame() && ao.taa_frame != ao.frame && ao.opaque >= 16 &&
+    if ((jitter_on() || g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_GSR2 || g_settings.upscaler == UPSCALE_PORY) && ao.tex && ao.frame == fx_frame() && ao.taa_frame != ao.frame && ao.opaque >= 16 &&
         st.rt.ncolor && st.rt.color[0] && st.rt.color[0] != ao.tex)
         taa_run();
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each pass its own submission)
@@ -3997,9 +4001,9 @@ static void draw_(CmdRec *r, bool indexed) {
         }
     }
     resolve_feedback(pr);
-    // (FSR 3: the interface mask; frame generation: the real frames' mask, for their in-between images - ip_ui_keep)
+    // (FSR 3, GSR 2: the interface mask; frame generation: the real frames' mask, for their in-between images - ip_ui_keep)
     extern float widescreen_aspect(void);  // (wide screens: the interface's image, ui_scene_rt, for its centred 16:9 box)
-    if (((g_settings.upscaler == UPSCALE_FSR3 && fsr3_on()) || (g_settings.frame_gen && ip_enabled()) || widescreen_aspect() > 1.0f) &&
+    if ((fsr3_on() || gsr2_on() || (g_settings.frame_gen && ip_enabled()) || widescreen_aspect() > 1.0f) &&
         !ip_replaying)
         ui_snapshot_check(pr);
     snap_reason = "draw-depthwrite";
@@ -4894,12 +4898,14 @@ static VkPipeline post_pipeline(const char *fs) { return post_pipeline_ex(fs, VK
 // 31: that image sharpened, 32: debanding (the last post pass), 33, 34: contact shadows (mask, blur: contact_run), 35: their
 // debug view, 36: an in-between image with frame N's interface (ip_ui_keep), 37: FSR 3.1's output with the interface
 // composited after it, 38, 39: the GI-size distance (R16, log2) and normals (gi_run). The in-between images at a
-// reduced size (vk_tex_lo_begin) have a set of their own (48 on):
+// reduced size (vk_tex_lo_begin) have a set of their own (64 on). 40-46: the optical flow's (flow_*), 47: GSR 2's output
+// sharpened, its interface after it, 50: its motion and depth clip (render size, RGBA16F), 51, 52: its history (output
+// size, ping-pong: gsr2_run):
 // sized for them, they were made again at every switch between a real frame and an in-between image, and the real
 // frames' histories (SSAO, GI, TAA) went with them.
 static TexBackend *post_image_fmt(int i, uint32_t w, uint32_t h, VkFormat fmt) {
-    static TexBackend img[96];
-    TexBackend *d = &img[i + (vk_tex_lo_active() ? 48 : 0)];
+    static TexBackend img[128];
+    TexBackend *d = &img[i + (vk_tex_lo_active() ? 64 : 0)];
     if (d->image && (d->width != w || d->height != h || d->format != fmt)) {
         vk_views_forget(d);
         vk_defer_image(d->image, d->mem);
@@ -5384,9 +5390,16 @@ static uint64_t taa_jit_frame = ~0ull;
 // its motion vectors and depth handed to it; TAA steps aside (FSR anti-aliases)
 static bool fsr3_engaged;
 static uint32_t fsr3_rw, fsr3_rh, fsr3_ow;
-static bool fsr3_on(void) { return g_settings.upscaler == UPSCALE_FSR3 && fsr3_engaged; }
+// (PorySR, with FSR 3.1's inputs: as FSR 3.1 here - its jitter sequence too)
+static bool fsr3_up(void) { return g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_PORY; }
+static bool fsr3_on(void) { return fsr3_up() && fsr3_engaged; }
+// Snapdragon GSR 2 ran at the last present (gsr2_run): the scene jittered as for FSR 3.1, a Halton sequence of
+// ceil(8 x ratio^2) phases (AMD's count for the ratio, which Qualcomm's sample takes too)
+static bool gsr2_engaged;
+static uint32_t gsr2_rw, gsr2_ow;
+static bool gsr2_on(void) { return g_settings.upscaler == UPSCALE_GSR2 && gsr2_engaged; }
 static bool taa_on(void) { return g_settings.antialias == AA_TAA && !fsr3_on(); }
-static bool jitter_on(void) { return taa_on() || fsr3_on(); }
+static bool jitter_on(void) { return taa_on() || fsr3_on() || gsr2_on(); }
 static float halton(uint32_t i, uint32_t b) {
     float f = 1, r = 0;
     for (; i; i /= b) f /= (float)b, r += f * (float)(i % b);
@@ -5403,6 +5416,11 @@ static const float *taa_jitter(void) {
         float w = ao.cw ? (float)ao.cw : 1280, h = ao.ch ? (float)ao.ch : 720;
         float jx = halton(i, 2) - 0.5f, jy = halton(i, 3) - 0.5f;
         if (fsr3_on()) fsr3_jitter(fsr3_rw, fsr3_ow, seq, &jx, &jy);  // (FSR's own sequence, for its ratio)
+        else if (gsr2_on() && gsr2_rw) {
+            float r = (float)gsr2_ow / (float)gsr2_rw;
+            uint32_t phases = (uint32_t)ceilf(8.0f * r * r), k = (uint32_t)(seq % phases) + 1;
+            jx = halton(k, 2) - 0.5f, jy = halton(k, 3) - 0.5f;
+        }
         taa_jit[0] = jx * 2.0f / w;  // (a pixel is 2 / size in clip units: the content moves by (jx, jy) pixels)
         taa_jit[1] = jy * 2.0f / h;
         taa_jit[2] = jx, taa_jit[3] = jy;
@@ -5537,6 +5555,43 @@ static TexBackend *ip_ui_keep(VkCommandBuffer cb, TexBackend *in, TexBackend *ni
 static double post_last_ow, post_last_oh;  // the output size post_process was last asked for
 static float g_present_grade[4];  // the colour grade post_process leaves to the present's draw ([3] > 0.5: apply it)
 static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_d, double oh_d, TexBackend **res);
+// Snapdragon GSR 2 (Qualcomm's Game Super Resolution 2, its 2-pass fragment variant: shaders.c gsr2_convert.frag,
+// gsr2_upscale.frag): the motion and how far each pixel's depth stands out from its neighbours' (render size), then the
+// image upscaled against the previous output moved along the motion (output size, a ping-pong history gamma-encoded as
+// the image, 10 bits a channel: in RGBA16F its reads and writes took 2.5 ms of an Adreno 830's frame at 2133 x 1200).
+// in: the image (render size, jittered by taa_jitter), mv: the motion vectors.
+static TexBackend *gsr2_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mv, uint32_t ow, uint32_t oh) {
+    static int cur;
+    static uint32_t still, hw, hh;  // (the frames the camera has stood still; the history's size)
+    static uint64_t last;           // (the real frame it last ran: one missed, the history starts again)
+    uint32_t rw = in->width, rh = in->height;
+    double dv_ = 0;
+    for (int i = 0; i < 16; i++) dv_ = fmax(dv_, fabs(ao.vp[i] - ao.vp_prev[i]));
+    still = ao.prev_ok && dv_ < 1e-6 ? still + 1 : 0;
+    bool reset = !ao.prev_ok || hw != ow || hh != oh || last + 1 != renderer_present_count();
+    hw = ow, hh = oh, last = renderer_present_count();
+    TexBackend *mda = post_image_fmt(50, rw, rh, VK_FORMAT_R16G16B16A16_SFLOAT);
+    TexBackend *prev = post_image_fmt(51 + cur, ow, oh, VK_FORMAT_A2B10G10R10_UNORM_PACK32);
+    cur ^= 1;
+    TexBackend *out = post_image_fmt(51 + cur, ow, oh, VK_FORMAT_A2B10G10R10_UNORM_PACK32);
+    float area = (float)ow * (float)oh / ((float)rw * (float)rh);
+    float pc[16] = {(float)rw, (float)rh, (float)ow, (float)oh, 1.0f / (float)rw, 1.0f / (float)rh, 1.0f / (float)ow, 1.0f / (float)oh,
+                    taa_jit[2], taa_jit[3], (float)ow / (float)rw, fminf(20.0f, area * area * area),
+                    // tan(horizontal fov / 2), minLerpContribution (Qualcomm's sample: 0.3 once the camera stood still
+                    // more than 5 frames), the reset (its output: this frame's image alone)
+                    (float)rw / ((float)rh * ao.proj[1]), still > 5 ? 0.3f : 0.0f, reset ? 1.0f : 0.0f, 0};
+    static const VkComponentMapping id = {0};
+    VkImageView dv = vk_image_view(ao.depth, VK_IMAGE_VIEW_TYPE_2D, ao.depth->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
+    VkImageView ci[2] = {dv, post_view(mv)};
+    post_pass_view(cb, post_pipeline_ex("gsr2_convert.frag", VK_FORMAT_R16G16B16A16_SFLOAT, 0), ci, 2, post_view(mda), rw, rh, pc,
+                   64, false, false);
+    VkImageView ui[3] = {post_view(prev), post_view(mda), raw_view(in)};
+    gp_mark(cb, "ours: GSR 2 upscale");
+    post_pass_view(cb, post_pipeline_ex("gsr2_upscale.frag", VK_FORMAT_A2B10G10R10_UNORM_PACK32, 0), ui, 3, post_view(out), ow, oh, pc,
+                   64, false, false);
+    return out;
+}
+static TexBackend *hold_copy_into(TexBackend *d, TexBackend *src);
 static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, double oh_d) {
     return post_process_ex(cb, b, ow_d, oh_d, NULL);
 }
@@ -5561,20 +5616,27 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
     // FSR 3: an upscale, its DLL, and this frame's scene depth and motion vectors at the image's size
     uint64_t fr = fx_frame();
     // (Native AA: FSR 3.1 at the same size, as anti-aliasing)
-    bool fsr3 = g_settings.upscaler == UPSCALE_FSR3 && (upscale || g_settings.fsr3_preset == FSR3_NATIVE_AA) && fsr3_available() &&
+    bool fsr3 = fsr3_up() && (upscale || g_settings.fsr3_preset == FSR3_NATIVE_AA) && fsr3_available() &&
+                (g_settings.upscaler != UPSCALE_PORY || porysr_available()) &&
                 ao.depth && ao.taa_frame == fr &&
                 ao.depth->width == b->width && ao.depth->height == b->height && ao.proj_frame == fr;
-    bool smaa = g_settings.antialias == AA_SMAA && !fsr3;
-    bool fsr = (g_settings.upscaler == UPSCALE_FSR1 || (g_settings.upscaler == UPSCALE_FSR3 && !fsr3)) && upscale;  // (an upscale only)
+    // Snapdragon GSR 2: the same, without a DLL (an in-between image of frame generation: resolved against N's output, as
+    // FSR 3.1's are)
+    bool gsr2 = g_settings.upscaler == UPSCALE_GSR2 && (upscale || g_settings.fsr3_preset == FSR3_NATIVE_AA) && ao.depth &&
+                ao.taa_frame == fr && ao.depth->width == b->width && ao.depth->height == b->height && ao.proj_frame == fr;
+    bool smaa = g_settings.antialias == AA_SMAA && !fsr3 && !gsr2;
+    bool fsr = (g_settings.upscaler == UPSCALE_FSR1 || (fsr3_up() && !fsr3) ||
+                (g_settings.upscaler == UPSCALE_GSR2 && !gsr2)) && upscale;  // (an upscale only)
     float grade[3] = {g_settings.brightness, g_settings.contrast, g_settings.saturation};  // (F12 menu)
     bool color = fabsf(grade[0] - 1) > 0.005f || fabsf(grade[1] - 1) > 0.005f || fabsf(grade[2] - 1) > 0.005f;
-    bool sharpen = taa_on() && !fsr && !fsr3 && g_settings.taa_sharpness > 0.01f;  // (TAA softens)
+    bool sharpen = taa_on() && !fsr && !fsr3 && !gsr2 && g_settings.taa_sharpness > 0.01f;  // (TAA softens)
     if (!fsr3) fsr3_engaged = false;
+    if (!gsr2 && !ip_side_post) gsr2_engaged = false;
     if (!ip_side_post) {  // (the real frames': the in-between images are rendered from the same constants)
         static float env = -100;
         if (env == -100) env = getenv("LARECOMP_MIP_BIAS") ? (float)atof(getenv("LARECOMP_MIP_BIAS")) : -99;
-        bool temporal = fsr3 || taa_on();
-        float off = env != -99 ? env : fsr3 ? -1.0f : -0.5f;
+        bool temporal = fsr3 || gsr2 || taa_on();
+        float off = env != -99 ? env : fsr3 || gsr2 ? -1.0f : -0.5f;
         float mb = temporal && off != 0 ? log2f((float)b->width / (float)ow) + off : 0;
         mb = roundf(mb * 4) / 4;
         mb = mb < -2 ? -2 : mb > 0 ? 0 : mb;
@@ -5594,19 +5656,19 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
     // Not with the optical flow and nothing else here: it starts from N's processed image (flow_prepare), and without
     // one there were no in-between images at all - Android, no anti-aliasing nor debanding: 30 fps with 4x on. The grade
     // stays here then, an identity one too.
-    bool flow_src = flow_on() && !smaa && !sharpen && !fsr && !fsr3 && !deband;
+    bool flow_src = flow_on() && !smaa && !sharpen && !fsr && !fsr3 && !gsr2 && !deband;
     if (flow_src) color = true;
-    bool grade_late = color && !sharpen && !fsr && !fsr3 && !deband && !flow_src;
+    bool grade_late = color && !sharpen && !fsr && !fsr3 && !gsr2 && !deband && !flow_src;
     g_present_grade[0] = grade[0], g_present_grade[1] = grade[1], g_present_grade[2] = grade[2];
     g_present_grade[3] = grade_late ? 1.0f : 0.0f;
     if (grade_late) color = false;
-    if (!smaa && !fsr && !color && !sharpen && !fsr3 && !deband) { if (res) *res = rb_; return v; }
+    if (!smaa && !fsr && !color && !sharpen && !fsr3 && !gsr2 && !deband) { if (res) *res = rb_; return v; }
     extern void vk_frame_suspend(void);
     extern void vk_frame_resume(void);
     vk_frame_suspend();
     // (frame generation without FSR 3.1: the real frame's interface mask, for its reduced in-between images' resolve -
     // ip_lo_resolve, ip_ui_keep)
-    if (!fsr3 && !ip_side_post && ip_enabled() && g_settings.frame_gen && ui_mask_build(cb, b, fr)) cb = vk_cmd();
+    if (!fsr3 && !gsr2 && !ip_side_post && ip_enabled() && g_settings.frame_gen && ui_mask_build(cb, b, fr)) cb = vk_cmd();
     if (smaa) {  // SMAA 1x: luma edges -> blending weights -> neighbourhood blending
         float w = (float)b->width, h = (float)b->height;
         float m[8] = {1.0f / w, 1.0f / h, w, h};
@@ -5634,13 +5696,18 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
         post_pass(cb, "rcas.frag", ri_, 1, r, pr, false);
         v = post_view(r), rb_ = r;
     }
-    if (fsr3) {  // FSR 3.1: the image (after the colour pass), the scene depth as R32F, the motion vectors
+    if (fsr3 || gsr2) {  // FSR 3.1 / GSR 2: the image (after the colour pass), the scene depth (FSR: as R32F), the motion vectors
         TexBackend *in = vb;
         // an in-between image (frame interpolation): resolved against N's FSR 3.1 output instead - FSR's history goes on
         // with the real frames only (side_resolve.frag, post image 30); it needs neither the depth copy nor the mask
         TexBackend *nh = ip_side_post ? ip_n_post(ow, oh) : NULL;
-        TexBackend *dr = nh ? NULL : post_image_fmt(23, b->width, b->height, VK_FORMAT_R32_SFLOAT);
-        TexBackend *out = post_image_fmt(24, ow, oh, VK_FORMAT_R8G8B8A8_UNORM);
+        // (OptiScaler injected, LARECOMP_FSR3_OPTISCALER=1: the image copied into one of ours that lives on. OptiScaler
+        // keeps the image views of a dispatch until the next one, and through a loading screen or a menu - no dispatch
+        // - the game freed its own image: destroying the view later, the NVIDIA driver jumped into freed memory)
+        static TexBackend fsr_in;
+        if (fsr3 && !nh && fsr3_optiscaler()) in = hold_copy_into(&fsr_in, in);
+        TexBackend *dr = nh || !fsr3 ? NULL : post_image_fmt(23, b->width, b->height, VK_FORMAT_R32_SFLOAT);
+        TexBackend *out = fsr3 ? post_image_fmt(24, ow, oh, VK_FORMAT_R8G8B8A8_UNORM) : NULL;
         TexBackend *mv = post_image_fmt(8, ao.depth->width, ao.depth->height, VK_FORMAT_R16G16B16A16_SFLOAT);
         static const VkComponentMapping id = {0};
         float pz[8] = {0};
@@ -5654,8 +5721,32 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
         VkImage mask = VK_NULL_HANDLE;
         TexBackend *mt = nh ? NULL : ui_mask_build(cb, b, fr);
         if (mt) mask = mt->image, cb = vk_cmd();  // (a dump submits the command buffer)
-        gp_mark(cb, "ours: FSR 3.1%s", ip_side_post ? " side resolve (in-between)" : "");
-        Fsr3Dispatch d = {.color = in->image, .depth = dr ? dr->image : VK_NULL_HANDLE, .mv = mv->image, .mask = mask, .output = out->image,
+        // (OptiScaler: the motion vectors and the mask copied too - post images 8 and 26 are made again at another size
+        // by the frames without FSR 3.1 in between, a menu or another scene's depth. And once a mask was given, one every
+        // frame - cleared where there is none: OptiScaler 10.0.0-pre1 destroys the last dispatch's mask view without
+        // forgetting it, and a dispatch without a mask left it to be destroyed again at the next one - the crash in the
+        // NVIDIA driver (FSR2_Vk.cpp, fsrTransparencyView), right after a loading screen or a menu)
+        static TexBackend fsr_mv, fsr_mask;
+        if (fsr3 && !nh && fsr3_optiscaler()) {
+            mv = hold_copy_into(&fsr_mv, mv);
+            if (mt) mask = hold_copy_into(&fsr_mask, mt)->image;
+            else if (fsr_mask.image && fsr_mask.width == b->width && fsr_mask.height == b->height) {
+                VkCommandBuffer c2 = vk_cmd();
+                vk_barrier(c2, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                           VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+                VkClearColorValue zero = {{0}};
+                VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                vkCmdClearColorImage(c2, fsr_mask.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &rg);
+                vk_barrier(c2, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+                mask = fsr_mask.image;
+            }
+            cb = vk_cmd();
+        }
+        gp_mark(cb, "ours: %s%s", !fsr3 ? "GSR 2" : g_settings.upscaler == UPSCALE_PORY ? "PorySR" : "FSR 3.1",
+                ip_side_post ? " side resolve (in-between)" : "");
+        Fsr3Dispatch d = {.color = in->image, .depth = dr ? dr->image : VK_NULL_HANDLE, .mv = mv->image, .mask = mask,
+                          .output = out ? out->image : VK_NULL_HANDLE,
                           .rw = b->width, .rh = b->height, .ow = ow, .oh = oh, .mvw = mv->width, .mvh = mv->height,
                           .jx = taa_jit[2], .jy = taa_jit[3],
                           // the vectors are this uv - the previous one; FSR takes previous - this, in pixels
@@ -5689,7 +5780,8 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
             }
             TexBackend *u = ip_ui_keep(cb, rb_, nh, false);  // (its interface: N's, ip_ui_keep)
             v = post_view(u), rb_ = u;
-        } else if (!vk_tex_lo_active() && fsr3_dispatch(cb, &d)) {  // (a reduced image never: below, FSR 1)
+        } else if (fsr3 && !vk_tex_lo_active() &&
+                   (g_settings.upscaler == UPSCALE_PORY ? porysr_dispatch(cb, &d) : fsr3_dispatch(cb, &d))) {  // (a reduced image never: below, FSR 1)
             // (its compute writes: the next post pass's barrier, or the end's, waits for them)
             v = post_view(out), rb_ = out;
             fsr3_engaged = true, fsr3_rw = b->width, fsr3_rh = b->height, fsr3_ow = ow;
@@ -5709,8 +5801,28 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
                 post_pass_view(cb, post_pipeline("ui_composite.frag"), ci, 3, post_view(c), ow, oh, pc, 32, false, false);
                 v = post_view(c), rb_ = c;
             }
+        } else if (gsr2 && !vk_tex_lo_active() && !ip_side_post) {  // (an in-between image without N's output: FSR 1)
+            TexBackend *g = gsr2_run(cb, in, mv, ow, oh);
+            v = post_view(g), rb_ = g;
+            gsr2_engaged = true, gsr2_rw = b->width, gsr2_ow = ow;
+            // Then in one pass: its sharpening, our RCAS at the strength FSR 3.1's slider sets (GSR 2 has none of its own),
+            // and the interface after the upscale, as FSR 3.1's (above): still where the mask says interface. (As two
+            // passes they took 1 ms each on an Adreno 830 at 2133 x 1200.)
+            static int uic = -1;
+            if (uic < 0) uic = getenv("LARECOMP_FSR3_UI_COMPOSITE") ? atoi(getenv("LARECOMP_FSR3_UI_COMPOSITE")) : 1;
+            bool ui = uic && mt, sharp = g_settings.fsr3_sharpness > 0.01f;
+            if (ui || sharp) {
+                gp_mark(cb, "ours: GSR 2 sharpening, interface");
+                TexBackend *c = post_image(47, ow, oh);
+                float pf[8] = {sharp ? exp2f(-2.0f * (1.0f - g_settings.fsr3_sharpness)) : 0.0f, ui ? 1.0f : 0.0f, 0, 0,
+                               (float)ow, (float)oh, 1.0f / (float)ow, 1.0f / (float)oh};
+                VkImageView fi[3] = {v, raw_view(in), ui ? post_view(mt) : raw_view(in)};
+                post_pass_view(cb, post_pipeline("gsr2_final.frag"), fi, 3, post_view(c), ow, oh, pf, 32, false, false);
+                v = post_view(c), rb_ = c;
+            }
         } else {
             fsr3_engaged = false;
+            if (!ip_side_post) gsr2_engaged = false;
             fsr = true;  // (FSR 1 below, this time)
         }
     }
@@ -5739,9 +5851,10 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
     {
         static uint32_t piw, pih, pow_, poh;
         static int psm = -1, pfs = -1;
-        int f = fsr3 && fsr3_engaged ? 3 : fsr;
+        int f = fsr3 && fsr3_engaged ? 3 : gsr2 && gsr2_engaged ? 4 : fsr;
         if (!ip_side_post && (b->width != piw || b->height != pih || ow != pow_ || oh != poh || smaa != psm || f != pfs))
-            LOG("[post] %ux%u%s%s -> %ux%u\n", b->width, b->height, smaa ? " smaa" : "", f == 3 ? " fsr3.1" : f ? " fsr1" : "", ow, oh);
+            LOG("[post] %ux%u%s%s -> %ux%u\n", b->width, b->height, smaa ? " smaa" : "",
+                f == 4 ? " gsr2" : f == 3 ? (g_settings.upscaler == UPSCALE_PORY ? " porysr" : " fsr3.1") : f ? " fsr1" : "", ow, oh);
         if (!ip_side_post) piw = b->width, pih = b->height, pow_ = ow, poh = oh, psm = smaa, pfs = f;  // (the real frames')
     }
     return v;
@@ -7145,7 +7258,7 @@ static TexBackend *ip_keep_image(TexBackend *b, int slot, bool now) {
     k->direct = NULL;
     TexBackend *res = NULL, *in = b;
     // (a reduced in-between image without FSR 3.1: back to N's size against N's image first, then processed as N was)
-    if (slot != IP_KEEP_N && vk_tex_lo_active() && !fsr3_on()) in = ip_lo_resolve(b);
+    if (slot != IP_KEEP_N && vk_tex_lo_active() && !fsr3_on() && !gsr2_on()) in = ip_lo_resolve(b);
     if (post_last_ow > 0 && post_last_oh > 0) {
         ip_side_post = slot != IP_KEEP_N;  // (an in-between image: FSR 3.1's history is the real frames' alone)
         post_process_ex(vk_cmd(), in, post_last_ow, post_last_oh, &res);
@@ -7156,7 +7269,7 @@ static TexBackend *ip_keep_image(TexBackend *b, int slot, bool now) {
         else hold_copy_into(&k->post, res);
         k->post_ok = true, k->ow = post_last_ow, k->oh = post_last_oh;
         // (N's own image, whole, when the reduced in-between images are resolved against it: ip_lo_resolve)
-        if (slot == IP_KEEP_N && ip_lo_factor() < 0.99f && !fsr3_on()) hold_copy_into(&k->raw, b), k->raw_ok = true;
+        if (slot == IP_KEEP_N && ip_lo_factor() < 0.99f && !fsr3_on() && !gsr2_on()) hold_copy_into(&k->raw, b), k->raw_ok = true;
         else if (!k->raw.image) hold_copy_into(&k->raw, b);
         k->raw.sx = b->sx, k->raw.sy = b->sy, k->raw.scalable = b->scalable;
         return &k->raw;
@@ -7667,7 +7780,7 @@ bool vk_interp_begin(TexBackend *b, TexBackend **hold, uint64_t period) {
         // Reduced in-between images: only with frame N's full-size image to resolve them against (FSR 3.1's output, or
         // N's own image)
         ip_lo = ip_lo_factor() < 0.99f &&
-                (fsr3_on() ? ip_n_post(post_last_ow, post_last_oh) != NULL : ip_keep[IP_KEEP_N].raw_ok && post_last_ow > 0);
+                (fsr3_on() || gsr2_on() ? ip_n_post(post_last_ow, post_last_oh) != NULL : ip_keep[IP_KEEP_N].raw_ok && post_last_ow > 0);
     }
     return ok;
 }
