@@ -742,3 +742,52 @@ Pedido: capturar a qualquer momento da batalha, mais fácil com o selvagem fraco
   instrumentados), e GPU-AV com `LARECOMP_NO_ROBUST=1` (acessos fora dos limites que a robustez esconde): nenhum erro.
   Aponta para o driver ou a placa; pedidos ao autor: versão do driver e testes desligando o que só a NVIDIA usa
   (`LARECOMP_WRITE_WATCH=0`, `LARECOMP_VK_NO_GMEM=1`, `LARECOMP_VERTEX_READ=copy`, `LARECOMP_ONE_QUEUE=1`).
+
+## Issue #31: o jogo fechava logo no início com 2002-6063 (24/10/2026)
+- **Log.** Pikachu, RTX 3060 Ti: depois do `fsp-srv` só uma leitura do RomFS (`romfs reads: 1 (0 KB)`) e
+  `svcBreak` com o resultado 2002-6063. Falta a linha `[fs] romfs index: N files`, que numa execução normal vem antes:
+  o índice do `extracted/romfs.bin` não pôde ser lido, então a imagem dele é inválida (cortada, ou o `romfs.bin` de
+  outra ferramenta que a configuração copiou como estava); o jogo leu um cabeçalho sem sentido e parou.
+- **Correção.** `romfs_image_ok` (runtime/romfs_build.c) confere a imagem: cabeçalho de 0x50 bytes, tabelas e dados
+  dentro do arquivo, e reconhece uma imagem IVFC. A configuração recusa uma imagem assim (falha nova
+  `SETUP_FAIL_IMAGE`, com mensagem na tela inicial e o motivo no log); com a imagem já instalada, a tela inicial mostra
+  essa falha e pede a configuração de novo; no boot, `fs.c` para com uma mensagem clara em vez do 2002-6063. Testado:
+  imagem cortada em 1 MB ("tables point past its end") e uma com cabeçalho IVFC param com a mensagem; a imagem boa
+  segue (27818 arquivos). Não sei ainda qual era a imagem do autor da issue: pedido o tamanho dela e de onde veio.
+
+## 60 fps: o mundo dava "pulinhos" andando, e o 1 % low (25/10/2026)
+- **Relato (usuário).** Andando para os lados a 60 fps o mundo dá pulinhos para acompanhar o personagem, como se
+  dessincronizado; a 30 não acontece. O 1 % low é ruim. E um fantasma de ficha na tela de salvar (print).
+- **Medida dos pulinhos.** `LARECOMP_CAM_LOG=1` (com TAA: o log vem da câmera dos vetores de movimento), andando
+  para a direita e a esquerda em ritmo real (`--turbo 0`): a câmera anda 6,52 cm por quadro, mas uma vez por passada
+  dava −1,00 (só a parte fixa do movimento, −2 cm × 0,5: a animação não somou nada) e depois um passo duplo; a 30 fps,
+  13,04 em todo quadro. Os quadros errados caíam quando dois temporizadores de animação do jogador (`f_70005fec30`:
+  `t += taxa × passo × velocidade`, `[0,40]`) davam a volta - um quadro atrasado: `39 → 40,000 (sem volta) → 1`.
+- **Causa.** O passo do mundo a 60 fps era `1e9 / 60 = 16666666` ns (divisão inteira, `follow_setting`), que em
+  float vira um fio abaixo de 1/60: `60 × passo = 0,99999994`, e o temporizador parava em 39,99999 em vez de 40. O
+  do jogo a 30 é 33333334 (arredondado para cima): cai exato. A constante `G1_60HZ` já era 16666667, mas a troca de
+  taxa recalculava.
+- **Correção.** `g1_for(rate)` arredonda para cima (16666667 a 60, 8333334 a 120). Medido: os passos perdidos e duplos
+  no meio da caminhada sumiram (as voltas caem exatas, `39 → 0`, como a 30).
+- **Pendente.** Ao soltar o direcional a 60 fps ainda há um passo duplo (12,78 cm): começa a animação de frear
+  (`[0,170]`) e o primeiro quadro dela soma um passo a mais; a 30 a freada é 13,04 → 4,78 → 0.
+- **1 % low.** Os engasgos andando (25–30 ms) coincidem com pipelines novos: um desenho com pipeline ainda em
+  compilação espera até um orçamento por quadro (`wait_built`), fixo em 20 ms - pensado para 30 fps (27 ms de folga);
+  a 60 o quadro inteiro tem 16,7. Agora o orçamento é 60 % do quadro (20 / 10 / 5 ms a 30 / 60 / 120). Mesma
+  caminhada, segunda passada: 1 % low 40,4 → 54,6 fps, quadros acima de 22 ms 7 → 0; desenhos pulados (o objeto aparece
+  um quadro depois) 74 → 441 em ~1000 quadros.
+- **Fantasma na tela de salvar.** Não reproduzido: 200 imagens intermediárias com a tela parada e a entrada dela, sem
+  ficha duplicada (a maior diferença para o quadro real, ~400 pixels, é a animação do personagem).
+
+## Batalhas selvagens a 60 fps: a volta depois da bola estourada rodava como menu e piscava (25/10/2026)
+- **Relato (usuário).** No modo 60 fps as batalhas ficam a 30, mas a que volta depois de a bola estourar ficava a 60 e
+  os menus dela piscavam (print do menu de golpes com a linha do Gust duplicada).
+- **Log.** Na primeira batalha `[fps60] battle / capture: 30 fps`; na volta, `world: 60 fps` e logo `menu: 30 fps with
+  in-between images` até a captura seguinte: a batalha contava como menu e ganhava imagens intermediárias.
+- **Causa.** A volta é criada de dentro de uma atualização do mundo (`field_hook` do wildbattle, no tique do mundo):
+  `start_battle` chama `fps60_scene_begin`, mas o fim dessa atualização (o `field_hook` do fps60) desfazia a marca, e o
+  mundo não roda de novo durante a batalha.
+- **Correção.** O gancho do evento de batalha reafirma a marca a cada atualização enquanto a nossa batalha está ativa.
+  Testado a 60 fps com bolas estourando: cada volta passa a `battle / capture: 30 fps` dois ou três quadros depois de
+  começar. O limite da abertura escondida subiu de 900 para 1500 quadros (uma volta a 60 fps chegou a 860 e foi
+  mostrada antes do menu).

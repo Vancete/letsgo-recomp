@@ -1,6 +1,28 @@
 # Changelog
 
-## Unreleased
+## 0.7.5 (2026-10-25)
+
+- **Fix: at 60 fps, the wild battle that comes back after a ball breaks ran as a menu** - at 60 with in-between
+  images, and its menus flickered. It now stays at 30 fps like every battle.
+
+## 0.7.4 (2026-10-25)
+
+- **Fix: walking at 60 / 120 fps, the world gave little jumps** once per stride: the world's time step was a hair short
+  of 1/60 s, so the walking animation's timers turned over one update late and the player lost a step, then took a
+  double one. It is now rounded as the game's own 30 fps step. (Letting go of the stick still gives one double step.)
+- **Steadier 60 fps when something new comes on screen**: a draw whose pipeline is still being built waited up to 20 ms
+  a frame, sized for 30 fps; it now waits up to 60 % of the frame. The same walk at 60 fps: 1 % low 40 -> 55 fps.
+
+## 0.7.3 (2026-10-24)
+
+- **Fix: a game data image the game can't read closed the game at start with 2002-6063** (issue #31). The setup now
+  checks `extracted/romfs.bin` (cut short, or another tool's format), the start screen says so and asks for the game
+  folder again, and the game stops with a clear message instead.
+
+## 0.7.2 (2026-10-24)
+
+Iván Serrano's ([@Vancete](https://github.com/Vancete), PRs #25 and #23): up to twice the frame rate when the CPU is
+the limit, cheaper SSAO and GI, the effects tuned by hand, and an optical flow frame generation.
 
 - **Optical flow: block matching ~10x cheaper** - each block's samples of frame N are read once for all the candidates
   instead of once per candidate (the same result). Adreno 830: matching 3.66 -> 0.25 ms, refining 1.69 -> 0.14 ms a frame.
@@ -71,6 +93,10 @@
   1.21, low 1.61 -> 0.97; contact shadows 0.54 -> 0.53.
 - **Title screen: no contact shadows** (SSAO Ultra): on its close-up of Pikachu they drew the shadows of its own arms
   onto its chest as jagged dark triangles. They are made for the world's scale (feet, grass, small props).
+
+- **Fix: "Make the 2x images" failed on an AMD integrated GPU** (issue #30): most of the upscaled images came back
+  wrong while the GPU couldn't keep up. A refused or failed upscale is now tried once more, much lighter (small tiles,
+  one thread each).
 
 ## 0.7.1 (2026-10-24)
 
