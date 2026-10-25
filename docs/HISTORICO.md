@@ -778,3 +778,16 @@ Pedido: capturar a qualquer momento da batalha, mais fácil com o selvagem fraco
   um quadro depois) 74 → 441 em ~1000 quadros.
 - **Fantasma na tela de salvar.** Não reproduzido: 200 imagens intermediárias com a tela parada e a entrada dela, sem
   ficha duplicada (a maior diferença para o quadro real, ~400 pixels, é a animação do personagem).
+
+## Batalhas selvagens a 60 fps: a volta depois da bola estourada rodava como menu e piscava (25/10/2026)
+- **Relato (usuário).** No modo 60 fps as batalhas ficam a 30, mas a que volta depois de a bola estourar ficava a 60 e
+  os menus dela piscavam (print do menu de golpes com a linha do Gust duplicada).
+- **Log.** Na primeira batalha `[fps60] battle / capture: 30 fps`; na volta, `world: 60 fps` e logo `menu: 30 fps with
+  in-between images` até a captura seguinte: a batalha contava como menu e ganhava imagens intermediárias.
+- **Causa.** A volta é criada de dentro de uma atualização do mundo (`field_hook` do wildbattle, no tique do mundo):
+  `start_battle` chama `fps60_scene_begin`, mas o fim dessa atualização (o `field_hook` do fps60) desfazia a marca, e o
+  mundo não roda de novo durante a batalha.
+- **Correção.** O gancho do evento de batalha reafirma a marca a cada atualização enquanto a nossa batalha está ativa.
+  Testado a 60 fps com bolas estourando: cada volta passa a `battle / capture: 30 fps` dois ou três quadros depois de
+  começar. O limite da abertura escondida subiu de 900 para 1500 quadros (uma volta a 60 fps chegou a 860 e foi
+  mostrada antes do menu).

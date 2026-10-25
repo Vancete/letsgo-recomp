@@ -358,6 +358,8 @@ extern volatile int g_present_fast, g_audio_muted;  // runtime/nvn/objects.c, ru
 static bool g_hidden;          // the opening is running hidden
 static bool g_menu_up;         // ... and its menu is up, waiting for the answer the player doesn't see
 static uint64_t g_hidden_since;
+// (a safety: shown anyway after this many frames. ~540-770 measured, up to 860 with the turn answered at 60 fps)
+#define HIDDEN_MAX 1500
 static int g_hidden_fade = 0xa, g_hidden_fade_frames = 2;  // the battle's own fade-in (its type and length), held back
 static void hidden_begin(void) {
     g_hidden = true, g_hidden_since = renderer_game_frame();
@@ -386,7 +388,7 @@ static int fade_log_hook(Cpu *c, uint64_t addr) {
         g_hidden_fade = (int)c->x[2], g_hidden_fade_frames = (int)c->x[3];
         return 1;
     }
-    if (g_hidden && renderer_game_frame() > g_hidden_since + 900) hidden_end(c, "too long");
+    if (g_hidden && renderer_game_frame() > g_hidden_since + HIDDEN_MAX) hidden_end(c, "too long");
     LOG("[wild] f%llu fade %s: x1 %llx x2(type) %llx x3 %llx x4 %llx x5 %llx\n", (unsigned long long)renderer_game_frame(),
         addr == rt_addr(FADE_IN_FN) ? "in " : "out", (unsigned long long)c->x[1], (unsigned long long)c->x[2], (unsigned long long)c->x[3],
         (unsigned long long)c->x[4], (unsigned long long)c->x[5]);
@@ -681,13 +683,20 @@ static int after_battle_hook(Cpu *c, uint64_t addr) {
 static bool g_state_log;
 static int battle_event_hook(Cpu *c, uint64_t addr) {
     int k = addr == rt_addr(BATTLE_EVENT_UPDATE);
+    // (60 fps: a battle, 30 fps without in-between images. start_battle says so, but the battle again starts from inside
+    // a world update - field_hook - whose end took it back as the world's: that battle ran as a menu, at 60 with
+    // in-between images, and its menus flickered. Said again on each of its updates.)
+    if (k && g_active) {
+        extern void fps60_scene_begin(void);
+        fps60_scene_begin();
+    }
     if (g_hidden && g_menu_up && g_catch.their_turn) {  // (A every 8 frames: the menu may not take it while it opens)
         extern void input_press_a_at(uint64_t frame);
         static uint64_t last;
         uint64_t f = renderer_game_frame();
         if (f >= last + 8 || f < last) last = f, input_press_a_at(f + 1);
     }
-    if (g_hidden && renderer_game_frame() > g_hidden_since + 900) hidden_end(c, "too long");
+    if (g_hidden && renderer_game_frame() > g_hidden_since + HIDDEN_MAX) hidden_end(c, "too long");
     uint32_t st = R32(c->x[0], 0x68);
     if (k && g_active && st == 4 && g_menu_seen && (R32(c->x[0], 0x574) & 0x80)) {  // (the legendaries' rule off: setup_limit_hook)
         R32(c->x[0], 0x574) &= ~0x80u;
