@@ -25,10 +25,14 @@ enum {
     SETUP_FAIL_COPY,        // disk full / unreadable files
     SETUP_FAIL_BUILD,       // the game code didn't build
     SETUP_FAIL_TOOLS,       // the generator / compiler are missing from this copy
+    SETUP_FAIL_IMAGE,       // the game data image (romfs.bin, the picked one or ours) isn't a RomFS the game can read
 };
 
 // The game files in <data root>/extracted: ready to play (exefs, romfs.bin and game code built for this version).
 bool setup_ready(void);
+// The game files set up, but no game code built for this version (a new version unzipped over the folder, or the
+// other CPU level): the launcher rebuilds it by itself (setup_start(NULL)).
+bool setup_needs_build(void);
 // The game in that exefs/ folder: "Eevee", "Pikachu" or NULL.
 const char *game_name(const char *exefs);
 // The build of that exefs/main: one with address tables (runtime/fnhook.c, tools/patches.py) - the 60 fps and wild

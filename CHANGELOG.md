@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-- **Frame generation, optical flow: block matching ~10x cheaper** - each block's samples of frame N are read once for
-  all the candidates instead of once per candidate (the same result): Adreno 830, 3.7 + 1.7 ms -> 0.25 + 0.14 ms a frame.
 - **Android: the display's refresh follows the frame generation** (the world's fps x its images per frame; Auto: the
   display's highest), asked with `ANativeWindow_setFrameRate` - left at 60 Hz, 3x / 4x images were drawn and dropped.
   A warm phone may still cap it at 60 Hz (thermal policy).
@@ -14,6 +12,33 @@
   sharpening at edges - instead of bilinear. ~0.3 ms a frame at 2133x1200 on an Adreno 830.
 - **The colour grade in the present** (brightness / contrast / saturation, F12 Image) when nothing comes after it: one
   full-size pass less. **Android: no debanding** by default (~12% of a phone's GPU frame at 1080p; `LARECOMP_DEBAND=1`).
+
+## 0.7.5 (2026-10-25)
+
+- **Fix: at 60 fps, the wild battle that comes back after a ball breaks ran as a menu** - at 60 with in-between
+  images, and its menus flickered. It now stays at 30 fps like every battle.
+
+## 0.7.4 (2026-10-25)
+
+- **Fix: walking at 60 / 120 fps, the world gave little jumps** once per stride: the world's time step was a hair short
+  of 1/60 s, so the walking animation's timers turned over one update late and the player lost a step, then took a
+  double one. It is now rounded as the game's own 30 fps step. (Letting go of the stick still gives one double step.)
+- **Steadier 60 fps when something new comes on screen**: a draw whose pipeline is still being built waited up to 20 ms
+  a frame, sized for 30 fps; it now waits up to 60 % of the frame. The same walk at 60 fps: 1 % low 40 -> 55 fps.
+
+## 0.7.3 (2026-10-24)
+
+- **Fix: a game data image the game can't read closed the game at start with 2002-6063** (issue #31). The setup now
+  checks `extracted/romfs.bin` (cut short, or another tool's format), the start screen says so and asks for the game
+  folder again, and the game stops with a clear message instead.
+
+## 0.7.2 (2026-10-24)
+
+Iván Serrano's ([@Vancete](https://github.com/Vancete), PRs #25 and #23): up to twice the frame rate when the CPU is
+the limit, cheaper SSAO and GI, the effects tuned by hand, and an optical flow frame generation.
+
+- **Optical flow: block matching ~10x cheaper** - each block's samples of frame N are read once for all the candidates
+  instead of once per candidate (the same result). Adreno 830: matching 3.66 -> 0.25 ms, refining 1.69 -> 0.14 ms a frame.
 
 - **Frame generation: a second method, optical flow** (F12 menu, advanced tab: "Frame generation method", with frame
   generation on; `fg_method = rerender | flow` in larecomp.ini, switched live). Re-rendering (the default)
@@ -72,6 +97,49 @@
   1.21, low 1.61 -> 0.97; contact shadows 0.54 -> 0.53.
 - **Title screen: no contact shadows** (SSAO Ultra): on its close-up of Pikachu they drew the shadows of its own arms
   onto its chest as jagged dark triangles. They are made for the world's scale (feet, grass, small props).
+
+- **Fix: "Make the 2x images" failed on an AMD integrated GPU** (issue #30): most of the upscaled images came back
+  wrong while the GPU couldn't keep up. A refused or failed upscale is now tried once more, much lighter (small tiles,
+  one thread each).
+
+## 0.7.1 (2026-10-24)
+
+- **Fix: updating to 0.7.0 asked for the game folder again.** 0.7.0's game code carries the CPU level it was built for,
+  so the library an earlier version built no longer matched, and the start screen showed the first setup instead of
+  rebuilding it. With the game files already set up, it now rebuilds the game code by itself (a few minutes, once).
+
+## 0.7.0 (2026-10-24)
+
+Iván Serrano's ([@Vancete](https://github.com/Vancete), PR #26): CPUs without AVX2.
+
+- **Runs on CPUs without AVX2** (issue #7): the start screen builds the game code for the machine's CPU, x86-64-v3
+  (AVX2, FMA, BMI2) as before where the CPU has it, x86-64-v2 (SSE4.2) otherwise. On an older CPU the fused
+  multiply-adds are done exactly in software and cost more.
+- **Wild battles: catch during the battle, with a CATCH button.** The battle menu gets a fifth button, CATCH, next to RUN,
+  drawn in the game's style in its nine languages (built at start from the player's own game files; trainer and
+  two-player battles keep their four buttons). It throws one Poké Ball through the game's own capture scene, and the
+  catch rate grows as the wild Pokémon weakens: up to x3 nearly fainted, x2.5 asleep or frozen, x1.5 paralysed, burnt
+  or poisoned; the ring's colour follows it. If the Pokémon breaks free, or you choose "Back to battle" (the capture's
+  Run away, renamed), the battle comes back (no question, a short dark screen, then your Pokémon already out) with the HP and status it
+  had - and after a ball that broke, the wild Pokémon moves first: the throw was your turn; if it
+  faints, it is lost, but the party gets its Exp. Points (the game's own: levels, new moves, and evolutions after the battle). The wild battles
+  no longer have the legendaries' 5-minute clock, and CATCH works even when a move like Wrap holds your Pokémon. Tested
+  on Eevee and Pikachu.
+- **Wild battles also with only the starter walking along** (issues #6 and #22): since 0.4.2 they needed another
+  Pokémon from the party walking with the player (without it the battle broke), and otherwise the touch went to the
+  usual capture - with Pikachu on the shoulder and no one walking along, the option looked like it did nothing. Now the
+  starter is sent out from a Poké Ball with its species' battle model. Tested with Eevee walking alone, on Eevee and
+  Pikachu.
+- **Wild battles: a knocked out wild Pokémon faints** ("Rattata fainted!", it falls and is called back) before the Exp.
+  Points, instead of the battle just ending. And going to the capture and back no longer leaves the field's music
+  playing over the battle's: the battle's music goes on through the capture and the battle again.
+
+- **Fix: the game closing after some minutes with 60 fps or frame generation on** (issue #21): the in-between images
+  re-ran the frame's command lists from the game's memory while the game was already recording the next frame there.
+  They now re-run a copy, checked against what ran.
+- **Fix: shadow lookups on a colour texture in battles** (issue #24): with no shadow map the game binds a small colour
+  texture where the shader compares depth, which Vulkan leaves undefined (a possible cause of the "device lost" on an
+  RTX 5070); a depth stand-in is bound instead, with the same lit result.
 
 ## 0.6.0 (2026-10-22)
 

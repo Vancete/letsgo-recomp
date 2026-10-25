@@ -610,10 +610,16 @@ static void *generate_thread(void *unused) {
     }
     fclose(f);
     LOG("[ui2x] %u interface textures (%u in formats left out), %.1f s\n", x.written, x.skipped, (plat_now_ns() - t0) / 1e9);
-    // 3: waifu2x (its models are found next to it: -m relative to its own folder)
-    g_state = UI2X_UPSCALING, g_progress = 0;
-    {
-        const char *argv[] = {exe, "-i", WORK "/in", "-o", WORK "/out", "-n", "1", "-s", "2", "-f", "png", "-m", "models-cunet", NULL};
+    // 3: waifu2x (its models are found next to it: -m relative to its own folder), then 4: the pack. On an AMD integrated
+    // GPU its output came back mostly wrong (issue #30: 2981 of 3081 images off) while the GPU didn't finish our own work
+    // within 10 s: once more, gentler - small tiles, one thread each (-t 32 -j 1:1:1) - then the start screen says to try
+    // again. (Its CPU mode, -g -1, crashes: waifu2x-ncnn-vulkan 20250915.)
+    for (int gentle = getenv("LARECOMP_UI2X_GENTLE") != NULL;; gentle = 1) {  // (test runs: LARECOMP_UI2X_GENTLE=1 starts there)
+        g_state = UI2X_UPSCALING, g_progress = 0;
+        plat_remove_tree(WORK "/out");
+        mkdir(WORK "/out", 0755);
+        const char *argv[] = {exe, "-i", WORK "/in", "-o", WORK "/out", "-n", "1", "-s", "2", "-f", "png", "-m", "models-cunet",
+                              gentle ? "-t" : NULL, "32", "-j", "1:1:1", NULL};
         int n_in = count_files(WORK "/in");  // (the images with transparency: two each)
         PlatProc p = plat_spawn(argv, WORK "/waifu2x.log", false);
         int r = -1;
@@ -623,8 +629,10 @@ static void *generate_thread(void *unused) {
                 SDL_Delay(200);
             }
         int made = count_files(WORK "/out");
-        LOG("[ui2x] waifu2x: exit %d, %d of %d images, %.1f s\n", r, made, n_in, (plat_now_ns() - t0) / 1e9);
-        if (r != 0 || made < n_in / 2) {
+        LOG("[ui2x] waifu2x%s: exit %d, %d of %d images, %.1f s\n", gentle ? " (small tiles)" : "", r, made, n_in,
+            (plat_now_ns() - t0) / 1e9);
+        bool ran = r == 0 && made >= n_in / 2;
+        if (!ran) {
             FILE *lg = fopen(WORK "/waifu2x.log", "rb");  // (its last lines into ours)
             if (lg) {
                 char buf[2048];
@@ -636,14 +644,16 @@ static void *generate_thread(void *unused) {
                 LOG("[ui2x] waifu2x said: ...%s\n", buf);
                 fclose(lg);
             }
-            g_state = UI2X_FAIL_UPSCALER;
-            goto done;
         }
+        if (ran) {
+            g_state = UI2X_PACKING, g_progress = 0;
+            g_rejected = 0, g_err_max = 0;
+            if (pack()) break;
+            if (g_rejected <= g_nitems / 10) { g_state = UI2X_FAIL_FILES; goto done; }
+        }
+        if (gentle) { g_state = UI2X_FAIL_UPSCALER; goto done; }
+        LOG("[ui2x] the upscaled images didn't work out: once more with small tiles\n");
     }
-    // 4: the pack
-    g_state = UI2X_PACKING, g_progress = 0;
-    g_rejected = 0, g_err_max = 0;
-    if (!pack()) { g_state = g_rejected > g_nitems / 10 ? UI2X_FAIL_UPSCALER : UI2X_FAIL_FILES; goto done; }
     plat_remove_tree(WORK);
     LOG("[ui2x] done in %.1f s\n", (plat_now_ns() - t0) / 1e9);
     g_state = UI2X_DONE, g_progress = 1;

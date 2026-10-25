@@ -484,8 +484,24 @@ static void host_test_frame(uint64_t frame) {
 
 static uint64_t g_pad_obj;
 volatile int g_inject_plus;  // frames to hold Plus for the game (movie.c: A / B skip the opening movie too)
+// A presses for the game at given frames (runtime/hle/wildbattle.c: answers that need no question), each held 4 frames
+static uint64_t g_press_a[4];
+void input_press_a_at(uint64_t frame) {
+    for (int i = 0; i < 4; i++)
+        if (!g_press_a[i] || g_press_a[i] + 4 < frame) { g_press_a[i] = frame; return; }
+}
 RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
+// Script entries "b<N>:<button>:<len>" count from the last input_mark() (runtime/hle/wildbattle.c marks each battle's
+// start), "c<N>:..." from the last input_mark_capture() (the capture after one of its battles): the encounter's frame
+// changes from run to run, the battle's own timing doesn't.
+static uint64_t g_last_frame;
+static long g_mark = -1, g_mark_c = -1;
+void input_mark(void) { g_mark = (long)g_last_frame; }
+void input_mark_capture(void) { g_mark_c = (long)g_last_frame; }
+long input_mark_frame(void) { return g_mark; }
+
 void input_frame(uint64_t frame) {
+    g_last_frame = frame;
     if (g_pad_obj && getenv("LARECOMP_DUMP_PAD") && frame % 600 == 0) {
         const uint8_t *m = (const uint8_t *)(uintptr_t)(g_pad_obj - 0x98);
         LOG("[pad] mgr %llx 4e0=%u 4e4=%u 4e8=%u 548=%#x 54c..=%02x %02x %02x 56c=%02x\n", g_pad_obj - 0x98,
@@ -519,8 +535,14 @@ void input_frame(uint64_t frame) {
     for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
         unsigned long start = 0, len = 10;
         char name[32] = "";
-        if (sscanf(tok, "%lu:%31[A-Z_0-9]:%lu", &start, name, &len) < 2) continue;
-        if (frame < start || frame >= start + len) continue;
+        if (*tok == 'b' || *tok == 'c') {  // (relative to a mark: real frames, outside the loop)
+            long m = *tok == 'b' ? g_mark : g_mark_c;
+            if (*tok == 'b' && g_mark_c > g_mark) continue;  // (the battle's entries stop when its capture starts)
+            if (m < 0 || sscanf(tok + 1, "%lu:%31[A-Z_0-9]:%lu", &start, name, &len) < 2) continue;
+            if (real_frame < (uint64_t)m + start || real_frame >= (uint64_t)m + start + len) continue;
+        } else if (g_mark >= 0 || sscanf(tok, "%lu:%31[A-Z_0-9]:%lu", &start, name, &len) < 2) continue;  // (after the
+            // mark only the relative entries: the walk's stick would move the battle's cursor)
+        else if (frame < start || frame >= start + len) continue;
         if (!strcmp(name, "STICK_UP")) ly = 32767;
         else if (!strcmp(name, "STICK_DOWN")) ly = -32767;
         else if (!strcmp(name, "STICK_LEFT")) lx = -32767;
@@ -598,6 +620,8 @@ static void fill_state(Cpu *c) {
         static uint64_t until;
         if (g_inject_plus > 0) { until = renderer_game_frame() + 10; g_inject_plus = 0; }
         if (renderer_game_frame() < until) b |= 1ull << BTN_PLUS;
+        for (int i = 0; i < 4; i++)
+            if (g_press_a[i] && renderer_game_frame() >= g_press_a[i] && renderer_game_frame() < g_press_a[i] + 4) b |= 1ull << BTN_A;
     }
     int32_t lx = clamp_axis((menu ? 0 : key_lx + pad_lx) + script_lx), ly = clamp_axis((menu ? 0 : key_ly + pad_ly) + script_ly);
     int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry) + script_ry);

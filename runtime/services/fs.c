@@ -9,6 +9,7 @@
 
 #include "../hle.h"
 #include "../mods.h"
+#include "../romfs_build.h"
 #include "../ipc.h"
 
 #define FS_PATH_NOT_FOUND MAKE_RESULT(2, 1)
@@ -20,7 +21,10 @@ const char *g_save_dir = "save";
 static int romfs_fd = -1;
 
 // ------------------------------------------------------------------ RomFS file index (offset -> path)
-typedef struct { uint64_t start, size; char *path; int fd; const uint8_t *mem; } Overlay;
+// mem: in-memory content; alt: another one (padded with zeros to size) served while use_alt() says so, own: both malloc'd
+// (alt: a file made at run time also has the other content, served unless its selector says the made one: sel 0 the wild
+// battles' menu, 1 their quick opening)
+typedef struct { uint64_t start, size; char *path; int fd; const uint8_t *mem; const uint8_t *alt; uint64_t alt_size; bool own; uint8_t sel; } Overlay;
 // in-image patches (copies of RomFS tables with changes): header, dir meta, file hash, file meta
 typedef struct { uint64_t off, size; uint8_t *data; } Patch;
 static Patch patches[8];
@@ -40,6 +44,7 @@ RT_ON_RESET(fs_reset) {
     for (int i = 0; i < ov_n; i++) {
         if (ov[i].fd >= 0) close(ov[i].fd);
         free(ov[i].path);
+        if (ov[i].own) free((void *)ov[i].mem), free((void *)ov[i].alt);
     }
     for (int i = 0; i < npatches; i++) free(patches[i].data);  // (ov_meta and the extended table are among these)
     for (int i = 0; i < rom_nfiles; i++) free(rom_files[i].path);
@@ -208,7 +213,7 @@ static void add_new_files(int fd, const uint64_t *h, const uint8_t *dmeta, uint6
         memcpy(hcopy + 4 * bucket, &entry, 4);
         o += 0x20 + ((nl + 3) & ~3u);
         if (ov_n == ov_cap) { ov_cap = ov_cap ? ov_cap * 2 : 256; ov = realloc(ov, sizeof *ov * ov_cap); }
-        ov[ov_n++] = (Overlay){data_at, size, strdup(nf[i].host), -1, NULL};
+        ov[ov_n++] = (Overlay){data_at, size, strdup(nf[i].host), -1, NULL, NULL, 0, false};
         rom_files[rom_nfiles++] = (RomFile){data_at, size, strdup(nf[i].rel), entry};
         data_at = (data_at + size + 0xF) & ~0xFull;
         added++;
@@ -216,7 +221,7 @@ static void add_new_files(int fd, const uint64_t *h, const uint8_t *dmeta, uint6
     // the new table goes before the new data (keep the overlay list sorted by start)
     if (ov_n == ov_cap) { ov_cap = ov_cap ? ov_cap * 2 : 256; ov = realloc(ov, sizeof *ov * ov_cap); }
     memmove(ov + (ov_n - added) + 1, ov + (ov_n - added), sizeof *ov * added);
-    ov[ov_n - added] = (Overlay){meta_at, nsz, NULL, -1, meta};
+    ov[ov_n - added] = (Overlay){meta_at, nsz, NULL, -1, meta, NULL, 0, false};
     ov_n++;
     ov_end = data_at;
     uint64_t fmeta_off = meta_at, fmeta_size = o;
@@ -259,11 +264,61 @@ static void rom_index(int fd) {
     }
     // A mod (runtime/mods.h): replacement files are served from its folder. The file-meta table is patched
     // (in a copy) to point them at data appended past the end of the image; reads there go to host files.
+    // The wild battles' menu (runtime/hle/catch_button.c): its files made again with a fifth button, served while one of
+    // those battles runs (the game's own - or a mod's - otherwise, padded to the same size).
+    extern bool wildbattle_enabled(void);
+    extern bool catch_button_file(const char *path, const char *mod, const uint8_t *d, size_t n, uint8_t **out, size_t *outn);
+    extern bool catch_button_failed(void);
+    extern void catch_button_begin(void);
+    typedef struct { uint8_t *made, *orig; size_t made_n, orig_n; uint8_t sel; } Made;
+    Made *mk = calloc(rom_nfiles, sizeof *mk);  // (all made first: served only if every one could be)
+    if (wildbattle_enabled()) {
+        catch_button_begin();
+        int nmade = 0;
+        for (int i = 0; i < rom_nfiles; i++) {
+            if (strncmp(rom_files[i].path, "bin/app/battle/bin/", 19)) continue;
+            char host[1200];
+            bool modded = mod_romfs_override(rom_files[i].path, host, sizeof host);
+            struct stat ms;
+            size_t n = modded ? (stat(host, &ms) ? 0 : (size_t)ms.st_size) : (size_t)rom_files[i].size;
+            uint8_t *orig = n ? malloc(n) : NULL;
+            int mfd = modded ? open(host, O_RDONLY) : fd;
+            bool got = orig && mfd >= 0 && pread(mfd, orig, n, modded ? 0 : (off_t)rom_files[i].off) == (ssize_t)n;
+            if (modded && mfd >= 0) close(mfd);
+            if (got && catch_button_file(rom_files[i].path, modded ? host : NULL, orig, n, &mk[i].made, &mk[i].made_n)) mk[i].orig = orig, mk[i].orig_n = n, nmade++;
+            else free(orig);
+        }
+        if (catch_button_failed() || nmade != 11) {
+            for (int i = 0; i < rom_nfiles; i++) free(mk[i].made), free(mk[i].orig), mk[i] = (Made){0};
+            LOG("[fs] the wild battles' menu: %d of 11 files made, the game's menu instead\n", nmade);
+        }
+        // the battle again after a capture: the wild Pokémon's entrance (its camera, 160 frames) one frame long
+        for (int i = 0; i < rom_nfiles; i++) {
+            if (strcmp(rom_files[i].path, "bin/battle/waza/sequence/ee330.bseq")) continue;
+            char host[1200];
+            bool modded = mod_romfs_override(rom_files[i].path, host, sizeof host);
+            struct stat ms;
+            size_t n = modded ? (stat(host, &ms) ? 0 : (size_t)ms.st_size) : (size_t)rom_files[i].size;
+            uint8_t *orig = n >= 0x10 ? malloc(n) : NULL;
+            int mfd = modded ? open(host, O_RDONLY) : fd;
+            bool got = orig && mfd >= 0 && pread(mfd, orig, n, modded ? 0 : (off_t)rom_files[i].off) == (ssize_t)n && !memcmp(orig, "SESD", 4);
+            if (modded && mfd >= 0) close(mfd);
+            if (!got) { free(orig); continue; }
+            mk[i].made = malloc(n), mk[i].made_n = n, mk[i].orig = orig, mk[i].orig_n = n, mk[i].sel = 1;
+            memcpy(mk[i].made, orig, n);
+            uint32_t one = 1;
+            memcpy(mk[i].made + 0xc, &one, 4);  // (the sequence's length in frames)
+        }
+    }
     for (int i = 0; i < rom_nfiles; i++) {
         char host[1200];
-        if (!mod_romfs_override(rom_files[i].path, host, sizeof host)) continue;  // (a mod's file: runtime/mods.h)
+        bool modded = mod_romfs_override(rom_files[i].path, host, sizeof host);  // (a mod's file: runtime/mods.h)
+        uint8_t *made = mk[i].made, *orig = mk[i].orig;
+        size_t made_n = mk[i].made_n, orig_n = mk[i].orig_n;
+        if (!modded && !made) continue;
         struct stat sb;
-        if (stat(host, &sb)) continue;
+        if (!made && stat(host, &sb)) continue;
+        if (made) sb.st_size = (off_t)(made_n > orig_n ? made_n : orig_n);
         if (!ov_meta) {
             ov_meta = malloc(fsz);
             memcpy(ov_meta, fmeta, fsz);
@@ -279,13 +334,22 @@ static void rom_index(int fd) {
         if (ov_n == ov_cap) { ov_cap = ov_cap ? ov_cap * 2 : 256; ov = realloc(ov, sizeof *ov * ov_cap); }
         ov[ov_n].start = ov_end;
         ov[ov_n].size = size;
-        ov[ov_n].path = strdup(host);
+        ov[ov_n].path = strdup(made ? rom_files[i].path : host);
         ov[ov_n].fd = -1;
         ov[ov_n].mem = NULL;
+        ov[ov_n].alt = NULL, ov[ov_n].alt_size = 0, ov[ov_n].own = false, ov[ov_n].sel = mk[i].sel;
+        if (made) {
+            uint8_t *full = calloc(1, size);  // (the made file, padded to the larger of the two)
+            memcpy(full, made, made_n);
+            free(made);
+            ov[ov_n].mem = full, ov[ov_n].alt = orig, ov[ov_n].alt_size = orig_n, ov[ov_n].own = true;
+            LOG("[fs] %s: the wild battles' %s (%zu -> %zu bytes)\n", rom_files[i].path, mk[i].sel ? "quick opening" : "menu", orig_n, made_n);
+        }
         ov_n++;
         ov_end = (ov_end + size + 0xF) & ~0xFull;
     }
-    if (ov_n) LOG("[fs] mod: %d romfs files replaced\n", ov_n);
+    free(mk);
+    if (ov_n) LOG("[fs] %d romfs files replaced\n", ov_n);
     if (ov_meta) { patches[npatches++] = (Patch){ov_meta_off, ov_meta_size, ov_meta}; }
     add_new_files(fd, h, dmeta, dsz, fsz);
     qsort(rom_files, rom_nfiles, sizeof *rom_files, rom_cmp);
@@ -305,6 +369,10 @@ static void touch_pages(uint64_t addr, ssize_t n) {
     }
 }
 
+bool wildbattle_menu_active(void);  // runtime/hle/wildbattle.c
+bool wildbattle_quick_intro(void);
+static bool made_on(uint8_t sel) { return sel ? wildbattle_quick_intro() : wildbattle_menu_active(); }
+
 static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
     if (!ov_n) return pread(fd, dst, size, (off_t)off);
     uint64_t done = 0;
@@ -317,7 +385,11 @@ static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
             uint64_t in = o - ov[i].start, avail = ((ov[i].size + 0xF) & ~0xFull) - in;
             if (n > avail) n = avail;
             ssize_t r;
-            if (ov[i].mem) {  // in-memory blob (the extended file table)
+            if (ov[i].alt && !made_on(ov[i].sel)) {  // the other content (zeros past its end)
+                uint64_t m = in < ov[i].alt_size ? (n < ov[i].alt_size - in ? n : ov[i].alt_size - in) : 0;
+                memcpy(dst + done, ov[i].alt + in, (size_t)m);
+                r = (ssize_t)m;
+            } else if (ov[i].mem) {  // in-memory blob (the extended file table, a file made at run time)
                 r = in < ov[i].size ? (ssize_t)(n < ov[i].size - in ? n : ov[i].size - in) : 0;
                 memcpy(dst + done, ov[i].mem + in, (size_t)r);
             } else {
@@ -395,6 +467,9 @@ static Service *open_romfs_storage(void) {
         snprintf(path, sizeof path, "%s.bin", g_romfs_dir);  // extracted/romfs.bin
         romfs_fd = open(path, O_RDONLY);
         if (romfs_fd < 0) FATAL("cannot open %s (set up the game files on the start screen)\n", path);
+        char why[128];  // (one that isn't a RomFS stopped the game at its first read with 2002-6063: issue #31)
+        if (!romfs_image_ok(path, why, sizeof why))
+            FATAL("%s is not a game data image the game can read (%s): set up the game files again on the start screen\n", path, why);
         rom_index(romfs_fd);
     }
     Storage *st = calloc(1, sizeof *st);

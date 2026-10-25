@@ -34,7 +34,12 @@ static _Atomic float g_progress;
 static _Atomic bool g_running;
 static char g_folder[1024];
 
-int setup_state(void) { return g_state; }
+static bool image_ok(void);
+static bool is_file(const char *p);
+int setup_state(void) {  // (idle with a romfs.bin set up before that can't be read: say so, the setup is to be done again)
+    if (g_state == SETUP_IDLE && !g_running && is_file(ROOT "/romfs.bin") && !image_ok()) return SETUP_FAIL_IMAGE;
+    return g_state;
+}
 float setup_progress(void) { return g_progress; }
 bool setup_running(void) { return g_running; }
 
@@ -107,8 +112,19 @@ const char *game_name(const char *exefs) {
     return id == TITLE_EEVEE ? "Eevee" : id == TITLE_PIKACHU ? "Pikachu" : NULL;
 }
 
+// (a romfs.bin that isn't a readable RomFS - cut short, or another dump tool's format - stopped the game at its first
+// read with 2002-6063, issue #31: set up again instead)
+static bool image_ok(void) {
+    char why[128];
+    return romfs_image_ok(ROOT "/romfs.bin", why, sizeof why);
+}
+
 bool setup_ready(void) {
-    return game_ok(ROOT "/exefs") && is_file(ROOT "/romfs.bin") && gamelib_present(ROOT);
+    return game_ok(ROOT "/exefs") && image_ok() && gamelib_present(ROOT);
+}
+
+bool setup_needs_build(void) {
+    return game_ok(ROOT "/exefs") && image_ok() && !gamelib_present(ROOT);
 }
 
 typedef struct { char exefs[1024], romfs[1024], romfs_bin[1024]; bool package; } Found;
@@ -180,6 +196,7 @@ static void *setup_thread(void *arg) {
     (void)arg;
     g_progress = 0;
     if (!g_folder[0]) {  // only the game code (files set up already, e.g. a new version of the app)
+        LOG("[setup] the game files are set up, the game code is from another version: rebuilding it\n");
         if (build_code()) g_state = setup_ready() ? SETUP_DONE : SETUP_FAIL_BUILD;
         g_running = false;
         return NULL;
@@ -226,8 +243,12 @@ static void *setup_thread(void *arg) {
         ok = romfs_build(f.romfs, ROOT "/romfs.bin", copy_progress, why, sizeof why);
         if (!ok) LOG("[setup] romfs image: %s\n", why);
     }
+    char why[128];
     if (!ok) g_state = SETUP_FAIL_COPY;
-    else if (build_code()) g_state = setup_ready() ? SETUP_DONE : SETUP_FAIL_BUILD;
+    else if (!romfs_image_ok(ROOT "/romfs.bin", why, sizeof why)) {
+        LOG("[setup] the game data image %s: %s\n", f.romfs_bin[0] ? f.romfs_bin : "(built)", why);
+        g_state = SETUP_FAIL_IMAGE;
+    } else if (build_code()) g_state = setup_ready() ? SETUP_DONE : SETUP_FAIL_BUILD;
     LOG("[setup] %s\n", g_state == SETUP_DONE ? "ready" : "failed");
     g_running = false;
     return NULL;

@@ -2,6 +2,7 @@
 // function calls FN_ENTER) between those presented frames, then writes build/fnprof.txt (addr, count, order of
 // first entry, guest lr of that first entry; most called first). Diffing two runs shows which game functions a change brings in; counts also show hot code.
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -69,14 +70,23 @@ static int cmp(const void *x, const void *y) {
     return a < b ? 1 : a > b ? -1 : 0;
 }
 
+// LARECOMP_FNPROF=b<from>:<to>: frames counted from the last input_mark() (runtime/hle/input.c: a wild battle's start)
+long input_mark_frame(void);
+
 void fnprof_frame(uint64_t frame) {
     static long from = -2, to;
+    static bool rel;
     if (from == -2) {
         from = -1;
         const char *e = getenv("LARECOMP_FNPROF");
+        if (e && *e == 'b') rel = true, e++;
         if (e && sscanf(e, "%ld:%ld", &from, &to) != 2) from = -1;
     }
     if (from < 0) return;
+    if (rel) {
+        if (input_mark_frame() < 0) return;
+        from += input_mark_frame(), to += input_mark_frame(), rel = false;
+    }
     if ((long)frame == from) { g_fnprof = 1; LOG("[fnprof] on at frame %llu\n", (unsigned long long)frame); }
     if ((long)frame != to) return;
     g_fnprof = 0;

@@ -307,6 +307,25 @@ static bool copy_dir(Dir *d, const char *dst, uint64_t *done, uint64_t total, vo
     return true;
 }
 
+bool romfs_image_ok(const char *path, char *why, size_t why_size) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { snprintf(why, why_size, "can't open it"); return false; }
+    uint64_t h[10] = {0};
+    size_t n = fread(h, 1, sizeof h, f);
+    fseeko(f, 0, SEEK_END);
+    uint64_t size = (uint64_t)ftello(f);
+    fclose(f);
+    if (n == sizeof h && !memcmp(h, "IVFC", 4)) { snprintf(why, why_size, "an IVFC image, not a plain RomFS"); return false; }
+    if (n != sizeof h || h[0] != 0x50) { snprintf(why, why_size, "no RomFS header (%llu bytes)", (unsigned long long)size); return false; }
+    for (int i = 1; i < 9; i += 2)  // (dir hash, dir meta, file hash, file meta: offset and size, inside the file)
+        if (!h[i + 1] || h[i + 1] > (64ull << 20) || h[i] > size || h[i + 1] > size - h[i]) {
+            snprintf(why, why_size, "its tables point past its end (%llu bytes: cut short?)", (unsigned long long)size);
+            return false;
+        }
+    if (h[9] > size) { snprintf(why, why_size, "its data starts past its end (%llu bytes)", (unsigned long long)size); return false; }
+    return true;
+}
+
 bool romfs_copy_tree(const char *src, const char *dst, void (*progress)(uint64_t, uint64_t)) {
     Dir *t = scan(src, "", NULL, 0);
     if (!t) return false;
