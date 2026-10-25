@@ -3194,10 +3194,14 @@ static void draw(CmdRec *r, bool indexed) {
 // skipped (objects popping in on entering an area). At 30 fps a frame has ~27 ms to spare (uncapped, the overworld
 // runs at ~160 fps), so 20 ms per frame hides the pop-in with a warm cache (~1 ms per program) without costing frames;
 // a cold cache (first visit) spends the budget and skips the rest as before. LARECOMP_SHADER_WAIT_MS=<ms> (0: never).
+// The budget follows the frame: 60 % of it (20 ms at 30 fps; 10 at 60, 5 at 120) - a fixed 20 ms made every frame with
+// a new pipeline 25-30 ms long at 60 fps (most of the 1 % lows walking into new places).
 static bool wait_built(_Atomic int *state) {
     if (atomic_load(state) != 0) return true;
-    static int64_t budget = -1;
-    if (budget < 0) budget = (getenv("LARECOMP_SHADER_WAIT_MS") ? atoi(getenv("LARECOMP_SHADER_WAIT_MS")) : 20) * 1000000ll;
+    static int64_t fixed = -2;
+    if (fixed == -2) fixed = getenv("LARECOMP_SHADER_WAIT_MS") ? atoi(getenv("LARECOMP_SHADER_WAIT_MS")) * 1000000ll : -1;
+    extern uint64_t fps60_period_ns(void);
+    int64_t budget = fixed >= 0 ? fixed : (int64_t)(fps60_period_ns() * 3 / 5);
     if (sync_shaders()) return true;  // (built already)
     extern uint64_t vk_frame_counter(void);
     static uint64_t frame;
