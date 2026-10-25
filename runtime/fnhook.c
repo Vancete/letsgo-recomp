@@ -41,6 +41,14 @@ static const uint64_t k_pikachu_100[][2] = {
     {0x700021b720, 0x700021b6f0}, {0x700020b810, 0x700020b7e0},  // (fps60.c: the walking at 60 / 120 fps)
     {0x70000395f0, 0x70000395f0}, {0x7000039600, 0x7000039600}, {0x700004eb50, 0x700004eb50},  // (same place)
     {0x7000180a20, 0x70001809f0}, {0x7000180a70, 0x7000180a40},  // (cutscene.c: the natives EvCameraStart / End)
+    // (wildbattle.c: catching during the battle)
+    {0x700028be80, 0x700028be50}, {0x70001afc00, 0x70001afbd0}, {0x700031a0e0, 0x700031a0b0}, {0x7000368330, 0x70003682d0},
+    {0x70006786b0, 0x7000678650}, {0x700071dfd0, 0x700071df70}, {0x70007dcb00, 0x70007dcb30}, {0x7000919970, 0x70009199a0},
+    {0x70009e2490, 0x70009e24a0}, {0x70009e4280, 0x70009e4290}, {0x7000ab1670, 0x7000ab1680}, {0x7000ab1af0, 0x7000ab1b00},
+    {0x7000ab1e80, 0x7000ab1e90}, {0x7000ab2730, 0x7000ab2740}, {0x7000ab49f0, 0x7000ab4a00}, {0x7000ab4a20, 0x7000ab4a30},
+    {0x7000ab4a30, 0x7000ab4a40}, {0x7000ab4a50, 0x7000ab4a60}, {0x700028c770, 0x700028c740}, {0x70009d8ae0, 0x70009d8af0},
+    {0x70007de080, 0x70007de0b0}, {0x7000a5c350, 0x7000a5c360}, {0x7000aaf230, 0x7000aaf240}, {0x7000319bc0, 0x7000319b90}, {0x70007de440, 0x70007de470}, {0x70009f7300, 0x70009f7310},
+    {0x7000a7e090, 0x7000a7e0a0}, {0x7000a99b40, 0x7000a99b50}, {0x7000a9c700, 0x7000a9c710}, {0x700016d060, 0x700016d030},
 };
 static int g_build = -1;  // GAME_BUILD_* (runtime/gamesetup.h); -1 before the first boot
 
@@ -96,11 +104,15 @@ void rt_fnhook_set_build(int build) {
     for (int i = 0; i < n; i++) reg(regs[i].addr, regs[i].fn, regs[i].user);
 }
 
+// (Every game function's entry passes here: the table first - bypass only ever names a hooked function, and the
+// thread-local read cost every call)
 int rt_fnhook(Cpu *c, uint64_t addr) {
-    if (bypass == addr) { bypass = 0; return 0; }
     uint32_t s = (uint32_t)((addr >> 2) * 0x9E3779B1u) & (NHOOK - 1);
     while (hooks[s].addr) {
-        if (hooks[s].addr == addr) return hooks[s].fn(c, addr);
+        if (hooks[s].addr == addr) {
+            if (bypass == addr) { bypass = 0; return 0; }
+            return hooks[s].fn(c, addr);
+        }
         s = (s + 1) & (NHOOK - 1);
     }
     return 0;
@@ -124,6 +136,7 @@ void rt_call_original(Cpu *c, uint64_t addr) {
         if (lo < *md->count && md->addrs[lo] == addr) {
             bypass = addr;
             md->fns[lo](c);
+            bypass = 0;  // (a function with no hook never took it: rt_fnhook reads it only on a hooked address)
             return;
         }
     }

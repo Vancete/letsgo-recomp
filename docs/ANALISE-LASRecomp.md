@@ -41,7 +41,7 @@ lasrecomp.exe (runtime) ── carrega lasgame.dll + lê RomFS do dump
 |---|---|---|---|
 | Loader NSO / relocação | `tools/nso.py`, `runtime/loader.c` | ✅ | Só carrega `main` + `sdk` (fixo em `loader.c:177`). Se o Let's Go tiver `subsdk*`, precisa estender. `SDK_BASE` = main + 64 MB: verificar se o `main` do Let's Go cabe. |
 | Lifter ARM64 → C | `tools/lifter.py`, `tools/gen.py`, `tools/analyze.py`, `tools/passes.py`, `tools/simd_c.py` | ✅ | Instruções não suportadas viram `rt_udf()` e aparecem nas estatísticas: dá pra medir a cobertura logo de cara. |
-| CPU / SIMD em C | `runtime/cpu.h`, `simd.h`, `simd_fp.h` | ✅ | Exige AVX2 no x86-64. |
+| CPU / SIMD em C | `runtime/cpu.h`, `simd.h`, `simd_fp.h` | ✅ | x86-64-v3 (AVX2, FMA) ou, sem AVX2, x86-64-v2 com as operações fundidas emuladas (mesmo resultado). |
 | Kernel (SVCs) | `runtime/kernel.c` | ✅ | ~40 SVCs: threads, sync, memória, eventos. Cobre o básico de qualquer jogo. |
 | IPC / serviços | `runtime/ipc.c`, `runtime/services/*` | 🟡 | Já tem: acc, aoc, apm, audout, audren, fs/save/sdcard, hid, lm, pctl, set, time. O Let's Go provavelmente pede mais (ex.: nifm, friends, ldn/comunicação local, bluetooth/Pokémon GO, pl/fontes). A maioria pode ser stub ("sem rede"). |
 | HLE por símbolo | `runtime/dispatch.c`, `runtime/hle.h` | ✅ | Função chamada e não implementada → loga `[hle] UNIMPLEMENTED <nome>` e retorna 0. Ótimo para descobrir o que falta. |

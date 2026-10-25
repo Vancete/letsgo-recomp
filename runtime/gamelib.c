@@ -16,7 +16,28 @@
 static const GameLibTables *g_tables;
 static char g_error[256];
 
-// The library's id file (<library>.id, written next to it by the build): its GAMELIB_ID, read without loading it.
+const char *gamelib_cpu_level(void) {
+#if defined(__x86_64__)
+    static const char *level;
+    if (!level) {
+        __builtin_cpu_init();
+        level = __builtin_cpu_supports("x86-64-v3") ? "v3" : "v2";
+        const char *env = getenv("LARECOMP_GAME_CPU");
+        if (env && !strcmp(env, "v2")) level = "v2";
+    }
+    return level;
+#else
+    return "base";
+#endif
+}
+
+const char *gamelib_id(void) {
+    static char id[64];
+    if (!id[0]) snprintf(id, sizeof id, "%s-%s", GAMELIB_ID, gamelib_cpu_level());
+    return id;
+}
+
+// The library's id file (<library>.id, written next to it by the build): its gamelib_id(), read without loading it.
 static bool id_matches(const char *lib) {
     char path[1100], id[128] = {0};
     snprintf(path, sizeof path, "%s.id", lib);
@@ -25,7 +46,7 @@ static bool id_matches(const char *lib) {
     size_t n = fread(id, 1, sizeof id - 1, f);
     fclose(f);
     while (n && (id[n - 1] == '\n' || id[n - 1] == '\r')) id[--n] = 0;
-    return !strcmp(id, GAMELIB_ID);
+    return !strcmp(id, gamelib_id());
 }
 
 static bool exists(const char *p) {
@@ -67,9 +88,9 @@ static const GameLibTables *open_lib(const char *path) {
 #endif
     if (!entry) { snprintf(g_error, sizeof g_error, "%s: not game code", path); return NULL; }
     const GameLibTables *t = entry();
-    if (!t || t->abi != GAMELIB_ABI || !t->id || strcmp(t->id, GAMELIB_ID)) {
+    if (!t || t->abi != GAMELIB_ABI || !t->id || strcmp(t->id, gamelib_id())) {
         snprintf(g_error, sizeof g_error, "%s was built for another version (library: abi %u id %s; this runtime: abi %u id %s)", path,
-                 t ? t->abi : 0, t && t->id ? t->id : "-", (unsigned)GAMELIB_ABI, GAMELIB_ID);
+                 t ? t->abi : 0, t && t->id ? t->id : "-", (unsigned)GAMELIB_ABI, gamelib_id());
         return NULL;  // (left loaded: nothing of it runs)
     }
     return t;

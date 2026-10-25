@@ -489,3 +489,256 @@ código em `runtime/hle/wildbattle.c`; opção "Batalhas selvagens (experimental
   rastreada testada só na NVIDIA: na 0.6.0 o rastreio (e com ele o cache) só liga sozinho quando o adaptador de vídeo
   principal é NVIDIA (`EnumDisplayDevices`, antes de o Vulkan existir); nas outras placas `LARECOMP_WRITE_WATCH=1` liga,
   e o log diz se ficou ligado. Numa placa que recuse a importação, o log mostra "guest heap import failed".
+
+## O Finish de cada quadro: a thread de renderização deixava o jogo mais lento (23/10/2026)
+
+- **Sintoma.** Sem limite de fps e com a GPU folgada (efeitos desligados, ou 4K com só SMAA), o jogo andava mais
+  devagar com a thread de renderização do que sem ela: Pallet Town (Pikachu) 122 fps ligada contra 179 desligada,
+  3 + 3 rodadas intercaladas. O contrário do que o item 59 mediu em Pewter.
+- **Diagnóstico.** Amostragem das threads (ponteiro de instrução e endereços de retorno na pilha): nenhuma thread
+  saturada (render 31-39 %, as três do jogo 21-31 %), todas esperando umas pelas outras. Contadores temporários no
+  `nvnSyncWait` / `nvnQueueFinish`: um `nvnQueueFinish` por quadro, ~4,4 ms cada (esvaziar a fila da thread de
+  renderização e depois esperar a GPU). Chamado sempre do mesmo ponto do laço de quadros do jogo (Pikachu
+  `main+0x29eec`): `fdiv d0, d0, 1e6` / `fmov d1, #4.0` / `fcmp` / `b.pl` - o jogo só chama o Finish quando o tempo de GPU
+  que ele mediu no quadro anterior (os dois `ReportCounter`, em ns) ficou abaixo de 4 ms. Os contadores medem o nosso
+  tempo de tradução, sempre abaixo de 4 ms: Finish em todo quadro, e jogo, thread de renderização e GPU em série.
+- **Correção.** Com a thread de renderização, esse Finish segue o caminho que o próprio jogo usa quando a GPU leva
+  4 ms ou mais (sem Finish; os fences dele continuam valendo). O ponto é reconhecido pelas instruções (endereço de
+  retorno e as quatro antes da chamada; padrão único no `main`), não por endereço. Os outros Finish (o mesmo laço
+  chama outro quando o modo de vídeo muda) não mudam. `LARECOMP_FRAME_FINISH=1` volta ao antigo.
+- **De passagem.** `CMD_FENCE_SYNC` (fence gravado numa lista) lia `x[1]` (a condição, sempre 0) em vez de `x[0]` (o
+  sync): esses fences nunca eram marcados. Corrigido; com a thread de renderização o sync recebe, quando a lista é
+  enviada, o ticket do trabalho que a executa (`nvn_list_*`, `objects.c`), e o `nvnSyncWait` espera só esse trabalho.
+  O Let's Go não usa fences em listas (as esperas sem fence são do sync do `nvnWindowAcquireTexture`): sem efeito aqui.
+  `rt_dispatch` (chamadas indiretas do jogo): a busca lenta saiu da função, que salvava 5 registradores e montava a
+  pilha em todo acerto do cache; `rt_fnhook` olha a tabela de ganchos antes da variável por thread. +1,5 % (4 + 4).
+- **Medido** (RTX 5070 Ti, 4K tela cheia, sem efeitos: `aa = off`, SSAO / GI / blur / sombras suaves desligados;
+  sem limite de fps, rodadas intercaladas, mesmo save copiado): Pallet Town parado 145 -> 307-313 fps (3 + 3 e 4 + 4), menu
+  aberto 140 -> 300, rota até a Rota 1 147 -> 260, andando em Pallet Town tempo médio por quadro 8,5 -> 5,0 ms (P95 8,4 ->
+  4,7); sem thread de renderização 204 -> 211. Com limite: 30, 60 e 120 fps e geração de quadros x2 com o mesmo ritmo e
+  P95/P99 da build anterior. Imagens dentro da variação entre duas rodadas da mesma build (PSNR 29-36 dB contra
+  27-33); captura completa de um Pidgey na Rota 1 sem defeito.
+- **Agora.** Com a thread de renderização ~50-70 % ocupada, o limite são as três threads do jogo (código recompilado
+  ~87 % do tempo ativo delas). A função mais pesada, `f_7000608b30` (Pikachu), ~13 %: busca linear por hash que
+  recalcula o FNV-1a do nome de cada candidato, byte a byte - o algoritmo do próprio jogo. `rt_fnhook` (todo início de
+  função, porque sempre há ganchos) ~4 % e `rt_dispatch` ~3 %: baixá-los exige mudar o `FN_ENTER` e recompilar o
+  código do jogo. Compilar o código do jogo com -O2 não muda nada: o `zig cc` do jogador gera objetos idênticos com
+  -O1, -O2 e -O3.
+
+## Batalhas selvagens: capturar no meio da batalha, com um 5º botão nativo (23/10/2026)
+Pedido: capturar a qualquer momento da batalha, mais fácil com o selvagem fraco ou com status, uma bola por vez (escapou
+→ volta à batalha), desmaiou = perdeu a chance, e uma opção nova e nativa no menu. Pesquisa e endereços em
+[MODO-BATALHA.md](MODO-BATALHA.md), etapa 6; código em `runtime/hle/wildbattle.c` e `runtime/hle/catch_button.c`.
+- **O motor de batalha não tem mais o arremesso clássico** (só sequências de mandar o Pokémon à luta). A captura é a cena
+  GO: a batalha termina como fuga e o runtime troca o resultado (3) por vitória (1), que o processo pós-batalha atende
+  abrindo a captura nativa.
+- **Sintoma: a vida da batalha não chegava à captura.** O objeto que vai à captura saía com a vida cheia mesmo depois de o
+  selvagem desmaiar. Causa: a vida fica no Pokémon de batalha (BTL_POKEPARAM, `+0x7e`) e só é devolvida no fim
+  (`9e4280`); a captura usa outro objeto. Correção: guardar vida e status nesse fim e devolvê-los na montagem da revanche
+  (`9e2490`).
+- **Sintoma: a vigia de leitura não via a taxa de captura.** A cópia crua do `personal_total.bin` no heap não é lida por
+  ninguém; o acesso é por `71dfd0` (GetPersonalParam, id 8). Gancho ali.
+- **Sintoma: com o 5º botão, o cursor não andava e o FIGHT derrubava o jogo.** Causa: a grade de navegação do `uikit`
+  guarda o número de colunas (4) num campo que parecia um vetor. Correção: 5 colunas.
+- **Sintoma: os 4 botões saíam ~207 à direita do que o layout dizia.** Causa: o código os posiciona a partir da borda
+  direita da área `B_bounding_00` (que eu tinha alargado). Correção: não alargar a área. (Depois, no teste do usuário, a
+  fileira ficou um passo à esquerda do original: com 5 botões o jogo já começa um passo antes, e eu ainda deslocava a
+  área. Correção: a área fica onde está; o CATCH termina onde o RUN terminava.)
+- **Sintoma: o CATCH animava ao ser escolhido, mas nada acontecia.** Causa: o jogo só liga às decisões os 4 botões de uma
+  tabela fixa (um callback gravado em cada botão). Correção: o runtime grava o mesmo callback no CATCH, com uma vista de
+  quadro 5 (id 0, ignorado pelo jogo), e trata esse caso.
+- **Batalhas de treinador e de 2 jogadores** continuam com os 4 botões: o `fs.c` entrega os arquivos montados só durante
+  as batalhas do modo e os originais (completados com zeros) nas outras. Testado com `LARECOMP_WILDBATTLE_CATCH_MENU=0`.
+- **Lições.** (1) Antes de alterar dados, ver o que o código faz com eles (posições e ids vinham do código). (2) Testes
+  em batalha precisam de entradas contadas a partir do início da batalha (`b<N>`): o encontro muda de quadro a cada rodada.
+  (3) Trocar o resultado de uma etapa do jogo (fuga → vitória) aproveitou o fluxo nativo inteiro.
+- **Sintoma (usuário): o jogo caiu com o mod "Traducao PT-BR".** O mod traz os rótulos dos botões em BC3/BC1 (o jogo usa
+  BC5/BC4); a troca de textura recusava o formato, o arquivo do idioma ficava sem o botão, mas as configurações do menu
+  já pediam 5 botões. Correção: a troca converte para qualquer BC1/BC3/BC4/BC5 (BC1 com o fundo transparente de 1 bit), a
+  montagem é tudo-ou-nada (11 arquivos ou o menu do jogo) e o rótulo vira CAPTURAR num mod português. **Em aberto:** com
+  esse mod o botão aparece como um quadrado preto. As texturas chegam certas à GPU (conferido com
+  `LARECOMP_DUMP_TEX_FMT`) e o layout do mod é o do jogo; trocando as texturas do CATCH pelas do FIGHT do próprio mod o
+  botão desenha certo, ou seja, o problema está em usar as texturas do BACK no arquivo do mod (a causa ainda não se
+  sabe). Sem o mod, certo.
+- **Sintoma (usuário): um relógio "MATCH TIME" de 5 minutos.** A montagem da batalha estática (`28c770`, a mesma do
+  Snorlax e dos lendários) grava 300 s em `+0x562` do evento de batalha. Correção: gancho depois dela, só nas nossas
+  batalhas, zera o tempo (sem tempo o jogo não mostra o relógio). Desligar também o bit `0x80` de `+0x574` derrubava o
+  jogo (ver abaixo).
+- **Sintoma (usuário): derrotar o selvagem não dava XP.** A regra dos lendários: com o bit `0x80` de `+0x574` (e o byte
+  `+0x584`), um nocaute encerra a batalha na hora, sem desmaio e sem XP; a checagem da XP é `9d8ae0` (competidor ≤ 1,
+  `+0x4a4` zero, sem `0x80`/`0x800` nas flags do setup em `+0xe0`). Primeira tentativa: desligar o bit. O selvagem passa a
+  desmaiar como num treinador, mas essa sequência procura um modelo que não existe (`a9c700` lê um ponteiro nulo:
+  `c0000005` em `651b40`) e, contornado isso, ainda espera segundos parada. Correção adotada: o bit fica (sem desmaio,
+  como os lendários) e o gancho em `9d8ae0` responde "XP ligada" nas nossas batalhas: "Bulbasaur got 10 Exp. Points!",
+  a barra enche e "Your party Pokémon in waiting also got Exp. Points!", depois a batalha acaba.
+- **Pedido: o "Run away" da captura volta à batalha, com um nome que diga isso.** São falas do `poke_get.dat` (linha 24
+  o botão, 4 a pergunta, 14 a confirmação), trocadas pelo gancho de falas só durante a nossa captura: "Back to battle",
+  "Do you want to go back to the battle?", "Back to the battle!" (9 idiomas).
+- **Pedido: a volta à batalha sem a abertura inteira do encontro.** A abertura é a sequência `ee330.bseq` (a câmera no
+  selvagem, 160 quadros), a fala "A wild X appeared!" e o envio (`ee420`). O `fs.c` monta no boot uma `ee330` de 1 quadro
+  e a entrega só na volta (`wildbattle_quick_intro`); a fala vira "The battle continues!". Medido: da primeira fala ao
+  "Go on" 27 quadros na volta (~890 na primeira batalha, nos testes acelerados).
+- **Armadilha dos testes:** o `capture_loop` roda a ~250 fps, então esperas por tempo real (som, carga) viram centenas de
+  quadros; "690 quadros parados" eram ~3 s. Medir em segundos (log `[vk] t=`) antes de chamar algo de lento.
+- **Sintoma (usuário): bater no Pokémon não mudava a cor do anel** (Pikachu amarelo com vida cheia e com vida pela metade).
+  Causa: na fórmula do Let's Go (`7de080`) a taxa da espécie entra elevada a 0,54, e eu multiplicava a taxa antes disso,
+  limitada a 255: num Pikachu (190) o ganho máximo era de 17%. Correção: o fator de vida/status (até ×3, ×2,5 sono) vai
+  no resultado da fórmula, de onde saem o anel e as sacudidas. Medido: Pidgey 5/18 de vida, 127,9 → 255.
+- **CATCH recusado com "You can't escape!"** (um Bellsprout preso com Wrap): o CATCH sai como fuga, e o cliente checa se
+  pode fugir (`a5c350`). Correção: com o CATCH pedido, a checagem responde sim.
+- **Pedido (usuário): a volta à batalha ainda mostrava o arremesso da Poké Ball.** A `ee420.bseq` (o envio) também vai com
+  1 quadro na volta, até a primeira escolha do menu (uma troca depois tem a animação normal). Comprimir ou adiantar os
+  comandos dela fazia o Pokémon não aparecer; cortada, ela não fecha a janela da fala de abertura, que ficava por cima
+  do menu - então essa fala não é aberta na volta (`aaf230`, gancho só para ela). Resultado: tela escura → flash → menu.
+- **Pergunta (usuário): quem atinge o nível evolui depois da batalha?** Não evoluía. O processo pós-batalha (`319bc0`)
+  marca no estado 0 quem subiu de nível (`+0xd8 + slot`) e, numa batalha de treinador (tipo 1), vai ao estado 1, o laço
+  que chama `728300` (a checagem) e `83cef0` (o evento de evolução, achado pela string `evolution_event.cpp`); a estática
+  (tipo 2) vai direto à captura ou ao fim. Correção: depois de um nocaute nosso, o estado 0 → 4 vira 0 → 1. Visto: Chansey
+  nível 100 com 1 de vida → Bulbasaur ao 19 → "Congratulations! Your Bulbasaur evolved into Ivysaur!" e o Nidoran ♂ →
+  Nidorino com a Pokédex, depois o mundo; no Pikachu também.
+- **Erro meu no caminho:** contei três "grew to Lv." como três níveis do Bulbasaur; eram três Pokémon do time, um nível
+  cada (a XP vai para o time todo). Conferir de quem é cada fala antes de concluir.
+- **O quadrado preto com o mod PT-BR: eram os mipmaps.** No arquivo do mod as texturas de rótulo têm 8 níveis de mipmap
+  (as do jogo, 1); a troca regravava só o nível 0 e zerava o resto, e o BC1 zerado é preto opaco. Numa tela de 1440p o
+  jogo lê o nível 0 (o botão aparecia certo para o usuário); nos testes em 480x270, um nível menor (preto). Correção:
+  todos os níveis, cada um a média 2x2 do anterior, com a altura de bloco Tegra de cada nível.
+- **Pedido: o "Back to battle" sem confirmação.** Primeiro o runtime apertava A na pergunta (`input_press_a_at`,
+  runtime/hle/input.c); o usuário viu a pergunta piscar ("um confirmar automático"). Correção de verdade: a saída da
+  captura é um diálogo (`7d2380` o cria em `[cena+0x760]`, máquina de estados em `+0x10`): o estado 0 (`7de440`) pergunta
+  e o "Sim" leva ao estado 1 (`7de7d0`, a saída). Na nossa captura o gancho no `7de440` só grava o próximo estado (1),
+  sem abrir a pergunta. O A automático ficou só para a fala seguinte, "Back to the battle!". (Apertar A na fala de
+  abertura da captura foi descartado: o cursor do menu começa onde calhar, e o A abria a Mochila ou arremessava.)
+- **Pedido: a volta à batalha sem o arremesso e com o Pokémon em campo.** A `ee420` (o envio) cortada, comprimida,
+  acelerada ou só com a parte final deixava o Pokémon do jogador fora de campo até o primeiro golpe (e a câmera no
+  treinador). Ficou a `ee420` original na volta: tela → "Vai lá, X!" com o arremesso → o Pokémon → menu; cortadas só a
+  câmera de apresentação (`ee330`) e a fala "X selvagem apareceu!".
+- **Em aberto (pedidos do usuário):** a abertura da cena de captura (a câmera e "Agora é sua chance!": a cena é uma
+  máquina de estados genérica, `7cb780`, com a abertura dentro do estado 1); a música da batalha recomeça na volta; o
+  "fantasma" piscando ao lado do CAPTURAR não apareceu nos testes (talvez o cursor de toque do runtime, desenhado 3 s
+  depois de o mouse ou o stick de toque se mexer).
+- **Pedido: a volta à batalha direto no menu, sem o arremesso (com o Eevee no ombro ele pulava, com bugs).** Nenhuma
+  edição da sequência de envio servia (o Pokémon ficava fora de campo). Solução: o envio roda inteiro, escondido. Na
+  volta, o fade-in da batalha é segurado (a tela continua escura da captura), o ritmo de quadros é desligado
+  (`g_present_fast`, runtime/nvn/objects.c) e o som zerado (`g_audio_muted`, runtime/services/audio.c); quando o menu de
+  comandos é montado (`ab2730`), tudo volta e o fade-in acontece: a tela abre já com o Pokémon em campo e o menu (vale
+  para a bola e para o parceiro do ombro). Limite: 900 quadros. Medido: ~540-630 quadros escondidos, ~2,5 s de tela
+  escura numa RTX 3080. Pular também a apresentação dos quadros escondidos quebrou a contagem de quadros (descartado).
+- **Pedido: depois de uma bola que estoura, a volta começa com o turno do selvagem** (o arremesso foi o turno do
+  jogador). Uma ação "pular a vez" (tipos 7, 5 e 0 no lugar do FIGHT) deixava o turno esperando a escolha do golpe.
+  Solução: com a tela ainda escura, o runtime aperta A no menu (`input_press_a_at`) e o `decide_hook` troca a escolha por
+  uma fuga (4, uma ação completa, como o CATCH); a rolagem de fuga do servidor (`9f7300`, chamada pela fuga `9f3ed0`)
+  responde "não escapou", e a janela de "You couldn't get away!" (fala 83) não abre. A tela clareia, o selvagem ataca
+  ("Bellsprout used Vine Whip!") e o menu volta. Teste: `LARECOMP_WILDBATTLE_THEIRTURN=1` faz isso em toda volta.
+- **Sintoma (usuário): depois da bola que estourou, o selvagem só agiu quando ele escolheu Lutar.** O A automático era
+  apertado uma vez, 2 quadros depois de o menu ser montado; no jogo dele (60 fps) caía antes de o menu aceitar e a tela
+  clareava pelo limite de segurança. Correção: A a cada 8 quadros enquanto o menu escondido espera
+  (`battle_event_hook`), até a escolha entrar. Testado a 30 e a 60 fps, Eevee e Pikachu.
+
+## Batalhas selvagens: o inicial andando sozinho também batalha (24/10/2026, issues #6 e #22)
+- **Antes.** Desde a 0.4.2, com o inicial andando sozinho (ou ninguém), o toque ia para a captura do jogo: a batalha
+  estática quebrava (`f_7000a9ddb0` lendo um nulo). Na 0.6.0 a dica do launcher passou a dizer isso (issue #22).
+- **Diagnóstico.** Com o `f_7000a7e090` ("é o inicial?") respondendo não, o inicial sai de uma Poké Ball (`ee420`) e a
+  abertura passa ("Go! Eevee!"), mas o Eevee não aparece e o jogo cai no primeiro golpe (`ac2d70` via `aeb690`). A
+  chave do modelo (`[modelo+0x1e0]`) ficava 0: em `f_7000a99b40` (x2 -> espécie u32, forma u8), o `f_7000176140`
+  reconhece o inicial (Pikachu forma 8, Eevee forma 1) e o ramo dele usa o modelo de campo de quem anda junto, que a
+  batalha estática não tem; o `f_7000a9bf20` (troca de movimento) procura o recurso por essa chave e lê o endereço 0.
+  Não existe `pm0133_01` (as formas do inicial são modelos de campo), só `pm0133_00` / `pm0025_00`.
+- **Correção.** Na nossa batalha, com o inicial andando sozinho: `f_7000a7e090` responde não (sai da bola) e o
+  `f_7000a99b40` recebe uma cópia do descritor com a forma 0, então o modelo é o da espécie, carregado pelo caminho
+  normal (`b8b70`). A proteção da 0.4.2 sai; a dica do launcher volta a não ter condição.
+- **Testado** por roteiro com um save com Eevee e Pidgey (o Eevee andando sozinho), no Eevee e no Pikachu 1.0.0 (o
+  mesmo save): o Eevee aparece, golpes, nocaute com XP, CATCH, volta escondida com o turno do selvagem e captura.
+  Não testado: um Pikachu inicial (forma 8) no ombro, por falta de save. Endereços no Pikachu: `a7e090` → `a7e0a0`,
+  `a99b40` → `a99b50`.
+
+## Batalhas selvagens: o selvagem desmaia, e a música do mundo tocando junto com a da batalha (24/10/2026)
+- **Sintoma (usuário): derrotar o Pokémon dava XP, mas ele não desmaiava.** Era a regra dos lendários (bit `0x80` de
+  `+0x574` do evento): o nocaute encerra a batalha sem desmaio. Zerar o bit na montagem (`28c770`) derruba o jogo
+  (`ee620`, `c0000005`). A tentativa anterior (acima) achou o modelo inexistente e uma espera de segundos; a espera era do
+  modo acelerado dos testes (~250 quadros/s): em ritmo real (`--turbo 0`), do nocaute à XP são ~2 s parados depois do
+  desmaio. Correção: o bit fica para a abertura e sai quando o menu de comandos aparece (`battle_event_hook`, estado 4,
+  depois do `ab2730`); o desmaio é o das batalhas de treinador (`ee620`: "Rattata fainted!", ele cai e é recolhido). A
+  sequência pede uma junta (`f_7000a9c700`) a um modelo de chave 0 (não é o do Pokémon de nenhum lado; provavelmente o
+  do treinador adversário) e lia o resultado nulo (`651b40`, `+0x360`); o gancho responde "sem junta", a resposta do
+  próprio jogo para uma junta que não existe. A XP continua pelo `9d8ae0` (o byte `+0x584` fica). Testado por roteiro: Eevee
+  (inicial sozinho) e Pikachu (outro Pokémon andando junto), nocaute com desmaio e XP; o Pokémon do jogador derrotado
+  por um selvagem nível 60 também desmaia e o jogo pede o próximo (o "desmaiou todo mundo" não foi até o fim).
+- **Sintoma (usuário): indo e voltando da captura, a música do mundo tocava junto com a da batalha.** As trocas de
+  música são eventos do Wwise com nome, enviados por `f_700016d060` (`{hash, nome, tamanho}`). A batalha estática manda
+  `Push_BGM_field_to_battle` ao começar (`28cbec`, se `f_700016cee0` disser que ainda não foi feito) e
+  `Pop_BGM_battle_to_field` quando o processo acaba (`28d84c`), o que para nós é o fim da captura. Log dos eventos: toda
+  captura que volta para a batalha mandava o Pop, e a batalha seguinte mandava o Push só uma vez sim, outra não. Correção:
+  numa captura que não pegou (a batalha vai voltar) o Pop não sai, e o Push seguinte também não; a música da batalha
+  segue pela captura e pela volta. No log, 8 voltas seguidas sem Pop nem Push; o fim normal (captura, nocaute) manda o
+  Pop. Os testes rodam sem som: o usuário jogou (capturas, bola que estourou e volta, "Back to battle", nocautes) e
+  confirmou a música e o desmaio.
+- Endereços no Pikachu: `a9c700` → `a9c710`, `16d060` → `16d030`.
+
+## Issue #21: o jogo fechava depois de minutos, na reexecução das imagens intermediárias (24/10/2026)
+- **Sintoma.** Fecha depois de 5 a 15 minutos (0.5.0 e 0.6.0, AMD RX 6600 XT; outros relatos sem log), com o 60 fps
+  ligado: `c0000005` lendo `0x5000000001` numa thread do runtime.
+- **Diagnóstico.** O log tem só endereços do runtime; recompilei a 0.5.0 numa worktree (mesmo compilador) e simbolizei
+  com `nm`: `exec_list` dentro de `vk_interp_render` (a reexecução de um quadro para as imagens intermediárias),
+  na thread de renderização.
+- **Causa.** A reexecução lia as listas de comando direto da memória de comandos do jogo, que ele reaproveita para
+  gravar o quadro seguinte enquanto a thread de renderização reexecuta este. O hash das listas era conferido no
+  começo (`vk_interp_begin`), mas a leitura acontecia depois: um registro meio reescrito deu a uma lista chamada (CALL) o
+  endereço `0x5000000001`.
+- **Correção.** No `vk_interp_begin` as listas são copiadas para um buffer do runtime (`ip_list_copy`, 8 MB, dobra se
+  faltar), com o hash calculado sobre a cópia e conferido com o da hora em que rodaram; a reexecução roda a cópia (JUMPs
+  seguidos, CALLs apontando para as cópias, com um JUMP por cima delas). As leituras ficam dentro da janela do guest.
+  Primeira versão errada: as listas chamadas ficavam logo depois do CALL e a lista de cima continuava dentro delas
+  ("0 blended"). Testado: geração de quadros 2x, a mistura nos mesmos níveis das rodadas sem a mudança (variação
+  normal entre rodadas maior que a diferença). O crash não foi reproduzido aqui; a correção é pela causa.
+
+## Issue #24: amostragem de sombra numa textura de cor, em batalha (24/10/2026)
+- **Sintoma.** "Device lost" (`address ip invalid`) numa RTX 5070 Laptop em batalha, quando o Bellsprout usa Wrap; sem
+  imagens intermediárias naquela hora (batalha a 30).
+- **O que se achou.** Na RTX 3080 o Wrap não trava. Com a camada de validação: `VUID-vkCmdDrawIndexed-None-06479`, um
+  shader de batalha faz uma comparação de profundidade (sombra) numa textura RGBA8: o jogo liga ali uma textura de cor
+  16x16 (formato `0x25`) quando não tem mapa de sombra. No Switch a comparação lê o vermelho dela; no Vulkan é
+  indefinido. (Um travamento da GPU numa rodada com validação, na tela de resumo, não se repetiu sem ela.)
+- **Correção.** Slot de comparação sem textura de profundidade recebe uma imagem de profundidade 1x1 em 1,0
+  (`vk_dummy_depth_view`): tudo iluminado, como contra a textura branca. Validação limpa em batalha com Wrap (3 usos);
+  imagens iguais. Se era a causa do travamento da 5070 só o autor da issue pode confirmar.
+
+## 0.7.0: atualizar por cima pedia a pasta do jogo de novo (24/10/2026, corrigido na 0.7.1)
+- **Sintoma.** Com a 0.7.0 descompactada sobre uma pasta da 0.6.0, o launcher mostrava a configuração inicial
+  ("Selecione a pasta do jogo extraído"), não a recompilação.
+- **Causa.** O PR #26 pôs o nível da CPU no id da biblioteca (`<id>-v3` / `-v2`); a da 0.6.0 (`<id>` sem sufixo) deixou
+  de servir, `setup_ready()` ficou falso e nada chamava `setup_start(NULL)` (só o código do jogo, já previsto em
+  `gamesetup.c`). Nas versões anteriores o id não tinha mudado, então o caso nunca apareceu.
+- **Como passou.** O teste da release nas pastas `D:\teste-0.7.0` não chegou a rodar a 0.7.0: os `lasrecomp.log` e as
+  DLLs delas ainda eram as cópias da 0.6.0; não conferi isso antes de publicar. Minha tentativa automática com
+  `LARECOMP_LAUNCHER_AUTOPLAY` ficou parada no launcher (ele só joga quando já está pronto).
+- **Correção (0.7.1).** `setup_needs_build()` (arquivos do jogo instalados, biblioteca de outra versão) e o launcher
+  chama `setup_start(NULL)` sozinho, uma vez. Testado numa cópia da pasta da 0.6.0 com a 0.7.1 por cima: recompilou
+  sozinho (id `...-v3`) e o jogo rodou até a gameplay.
+- **Lição.** Antes de publicar, conferir nas pastas de teste o log e a DLL da versão nova (data e id), não só a
+  resposta do teste; e testar o caminho de quem atualiza (pasta da versão anterior com a nova por cima).
+
+## Pisca-pisca das árvores em batalha com TAA (24/10/2026, não é regressão)
+- **Relato (usuário, testando a 0.7.1).** A vegetação pisca nas batalhas.
+- **Medida.** Quadros seguidos de uma batalha fixa, pixels da parte de cima que sobem e descem (±24) em três quadros:
+  TAA 1,1 %, SMAA 0,05 %; SSAO Ultra pouco muda (0,9 % sem). 0.6.0 e 0.7.1 com a batalha parada: iguais (0,44–0,78 %
+  contra 0,33–1,09 %). Uma primeira comparação parecia mostrar piora, mas o runtime da 0.6.0 ignorava as entradas
+  `b<N>` do roteiro (a batalha ficava parada) - comparar só com roteiros que as duas versões entendem.
+- **Pendente.** O TAA nas folhas recortadas das árvores em batalha (com ação); SMAA não tem.
+
+## Issue #30: "Make the 2x images" falhava numa AMD integrada (24/10/2026)
+- **Log.** O waifu2x gerou as 4708 imagens (saída 0), mas de volta a 1x 2981 das 3081 texturas ficaram longe do
+  original (média > 16): o pacote foi recusado. Ao mesmo tempo o launcher avisou "GPU did not finish submission
+  within 10 s": a GPU integrada, compartilhada, não dava conta do waifu2x e do nosso desenho juntos.
+- **O que não serve.** O modo CPU do waifu2x-ncnn-vulkan 20250915 (`-g -1`) dá falha de segmentação (testado aqui, com
+  e sem `-t`).
+- **Correção.** Se a saída falha ou é recusada, uma segunda vez mais leve: blocos de 32 e uma thread por etapa
+  (`-t 32 -j 1:1:1`). Na RTX 3080 (`LARECOMP_UI2X_GENTLE=1`): 4708 imagens, nenhuma recusada (maior erro 7,35), ~5 min.
+  Se resolve na AMD integrada só o autor da issue pode dizer.
+
+## Issue #24 na 0.7.0: validação completa no Wrap, sem erro (24/10/2026)
+- **Relato.** Mesma queda na RTX 5070 Laptop com a 0.7.0 (sem 60 fps); a GPU reinicia; com a Intel integrada não
+  acontece; algo parecido num recomp de outro jogo.
+- **Feito aqui (RTX 3080).** Batalha com Bellsprout só com Wrap: validação de núcleo, depois GPU-AV (shaders
+  instrumentados), e GPU-AV com `LARECOMP_NO_ROBUST=1` (acessos fora dos limites que a robustez esconde): nenhum erro.
+  Aponta para o driver ou a placa; pedidos ao autor: versão do driver e testes desligando o que só a NVIDIA usa
+  (`LARECOMP_WRITE_WATCH=0`, `LARECOMP_VK_NO_GMEM=1`, `LARECOMP_VERTEX_READ=copy`, `LARECOMP_ONE_QUEUE=1`).
