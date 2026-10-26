@@ -17,10 +17,14 @@ enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25
 // GSR: Snapdragon Game Super Resolution 1 in the present's draw (exec.c vk_present_draw), with any anti-aliasing;
 // GSR2: Snapdragon Game Super Resolution 2, temporal (exec.c gsr2_run) - GSR 1 on Android only (elsewhere bilinear);
 // DITTO: DittoSR, a local test upscaler with FSR 3.1's inputs (runtime/nvn/vulkan/fsr3.cpp dittosr_*), FSR 1 without it
-enum { UPSCALE_BILINEAR = 0, UPSCALE_FSR1 = 2 /* AMD FSR 1 */, UPSCALE_FSR3 = 3, UPSCALE_GSR = 4, UPSCALE_GSR2 = 5, UPSCALE_DITTO = 6 };
+enum { UPSCALE_BILINEAR = 0, UPSCALE_FSR1 = 2 /* AMD FSR 1 */, UPSCALE_FSR3 = 3, UPSCALE_GSR = 4, UPSCALE_GSR2 = 5, UPSCALE_DITTO = 6,
+       UPSCALE_DITTO_EXP = 7 /* (local experiment: DittoSR's cheaper variants, ditto_sr.h) */,
+       UPSCALE_DITTO_EXP2 = 8 /* (local experiment: GSR 2's scaffolding, passes of our own - exec.c gsr2_run) */ };
+#define UPSCALE_IS_GSR2(u) ((u) == UPSCALE_GSR2 || (u) == UPSCALE_DITTO_EXP2)
+#define UPSCALE_IS_DITTO(u) ((u) == UPSCALE_DITTO || (u) == UPSCALE_DITTO_EXP)
 // the temporal upscalers: they anti-alias the image themselves (the anti-aliasing setting is set aside) and take a mode
 // (fsr3_preset) for the render resolution
-#define UPSCALE_TEMPORAL(u) ((u) == UPSCALE_FSR3 || (u) == UPSCALE_GSR2 || (u) == UPSCALE_DITTO)
+#define UPSCALE_TEMPORAL(u) ((u) == UPSCALE_FSR3 || UPSCALE_IS_GSR2(u) || UPSCALE_IS_DITTO(u))
 // The temporal upscalers' modes (AMD's ratios, each axis): the render resolution is the window's divided by it
 enum { FSR3_NATIVE_AA = 0, FSR3_QUALITY = 1, FSR3_BALANCED = 2, FSR3_PERFORMANCE = 3, FSR3_ULTRA_PERFORMANCE = 4 };
 float settings_fsr3_ratio(void);  // 1.0, 1.5, 1.7, 2.0, 3.0

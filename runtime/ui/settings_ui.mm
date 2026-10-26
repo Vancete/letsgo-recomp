@@ -567,8 +567,8 @@ void ui_page_graphics(float x, bool known) {
     {
         static int ditto = -1;
         if (ditto < 0) ditto = dittosr_present();
-        const char *names[6];
-        int ids[6], n = 0, cur = 0;
+        const char *names[8];
+        int ids[8], n = 0, cur = 0;
         names[n] = UI_T("Bilinear", "Bilinear", "Билинейное"), ids[n++] = UPSCALE_BILINEAR;
 #ifdef __ANDROID__
         names[n] = "Snapdragon GSR", ids[n++] = UPSCALE_GSR;
@@ -576,6 +576,8 @@ void ui_page_graphics(float x, bool known) {
         names[n] = "Snapdragon GSR 2", ids[n++] = UPSCALE_GSR2;
         names[n] = "FSR 3.1", ids[n++] = UPSCALE_FSR3;
         if (ditto || g_settings.upscaler_pick == UPSCALE_DITTO) names[n] = "DittoSR", ids[n++] = UPSCALE_DITTO;
+        if (ditto || g_settings.upscaler_pick == UPSCALE_DITTO_EXP) names[n] = "DittoSR Experiment", ids[n++] = UPSCALE_DITTO_EXP;
+        names[n] = "DittoSR Experiment 2", ids[n++] = UPSCALE_DITTO_EXP2;  // (local experiment: GSR 2 based, no data needed)
         for (int i = 0; i < n; i++) if (ids[i] == g_settings.upscaler_pick) cur = i;
         ui_row(l[8], x);
         if (ui_combo("##upscaler", &cur, names, n)) g_settings.upscaler_pick = ids[cur], settings_apply_levels();
@@ -593,7 +595,7 @@ void ui_page_graphics(float x, bool known) {
     // and its sharpening - RCAS, AMD's robust contrast-adaptive sharpening, inside FSR 3.1 / DittoSR, our own pass after
     // GSR 2 (rcas.frag); the frame generation's in-between images take it too (exec.c post_process_ex)
     if (UPSCALE_TEMPORAL(g_settings.upscaler)) {
-        const char *name = g_settings.upscaler == UPSCALE_GSR2 ? "GSR 2" : g_settings.upscaler == UPSCALE_DITTO ? "DittoSR" : "FSR 3.1";
+        const char *name = UPSCALE_IS_GSR2(g_settings.upscaler) ? "GSR 2" : UPSCALE_IS_DITTO(g_settings.upscaler) ? "DittoSR" : "FSR 3.1";
         const char *pr[] = {UI_T("Native AA (1.0x)", "AA nativo (1,0x)", "Нативное AA (1,0x)"),
                             UI_T("Quality (1.5x)", "Qualidade (1,5x)", "Качество (1,5x)"),
                             UI_T("Balanced (1.7x)", "Equilibrado (1,7x)", "Баланс (1,7x)"),

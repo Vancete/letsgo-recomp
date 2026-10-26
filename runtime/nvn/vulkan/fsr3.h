@@ -11,6 +11,7 @@ typedef struct {
     float mv_scale_x, mv_scale_y;            // the motion vectors to pixels, previous - current
     float near_, far_, fov_y, meters_per_unit, frame_ms, sharpness;
     bool reset;                              // no history (a cut, the first frame)
+    bool exp;                                // (LOCAL experiment: DittoSR Experiment's variant)
 } Fsr3Dispatch;
 
 bool fsr3_available(void);
@@ -26,4 +27,7 @@ bool fsr3_optiscaler(void);
 bool dittosr_present(void);
 bool dittosr_available(void);
 bool dittosr_dispatch(VkCommandBuffer cb, const Fsr3Dispatch *d);
+// (LOCAL experiment, DittoSR Experiment: its output's scale of the window's sides; and DittoSR into an image of that
+// size - d's output sizes set to it, *out (exec.c's TexBackend) the image)
+float dittosr_exp_scale(void);
 

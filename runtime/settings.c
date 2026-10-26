@@ -132,7 +132,7 @@ static void parse_line(const char *line) {
     // anti-aliasing choices have "aa = fsr3" and the like and then "upscaler = bilinear" or "gsr": the "aa" one stands)
     else if (!strcmp(key, "upscaler")) {
         int u = !strcmp(val, "fsr3") ? UPSCALE_FSR3 : !strcmp(val, "gsr") ? UPSCALE_GSR : !strcmp(val, "gsr2") ? UPSCALE_GSR2 :
-                !strcmp(val, "dittosr") ? UPSCALE_DITTO : UPSCALE_BILINEAR;
+                !strcmp(val, "dittosr") ? UPSCALE_DITTO : !strcmp(val, "dittosr_exp") ? UPSCALE_DITTO_EXP : !strcmp(val, "dittosr_exp2") ? UPSCALE_DITTO_EXP2 : UPSCALE_BILINEAR;
         if (!aa_upscaled || UPSCALE_TEMPORAL(u)) g_settings.upscaler_pick = u;
     }
     // (an older "antialias = off" was only LAS Recomp's default being saved: a new key, so SMAA starts on)
@@ -226,7 +226,7 @@ void settings_apply_levels(void) {
     }
     if (g_settings.antialias < AA_OFF || g_settings.antialias > AA_TAA) g_settings.antialias = AA_SMAA;
     int u = g_settings.upscaler_pick;
-    if (u != UPSCALE_FSR3 && u != UPSCALE_GSR && u != UPSCALE_GSR2 && u != UPSCALE_DITTO) g_settings.upscaler_pick = u = UPSCALE_BILINEAR;
+    if (u != UPSCALE_FSR3 && u != UPSCALE_GSR && !UPSCALE_IS_GSR2(u) && !UPSCALE_IS_DITTO(u)) g_settings.upscaler_pick = u = UPSCALE_BILINEAR;
 #ifndef __ANDROID__
     if (u == UPSCALE_GSR) u = UPSCALE_BILINEAR;  // (Snapdragon GSR 1: the phones' upscaler)
 #endif
@@ -292,9 +292,9 @@ void settings_save(void) {
     fprintf(f, "smaa = %d\n", g_settings.antialias != AA_OFF);
     fprintf(f, "aa = %s\n", g_settings.antialias == AA_TAA ? "taa" : g_settings.antialias == AA_SMAA ? "smaa" : "off");
     // (an older version reads "fsr3" here as FSR 3.1, the others as bilinear)
-    static const char *const ups[] = {"bilinear", "bilinear", "bilinear", "fsr3", "gsr", "gsr2", "dittosr"};
+    static const char *const ups[] = {"bilinear", "bilinear", "bilinear", "fsr3", "gsr", "gsr2", "dittosr", "dittosr_exp", "dittosr_exp2"};
     int up = g_settings.upscaler_pick;
-    fprintf(f, "upscaler = %s\n", ups[up >= 0 && up <= UPSCALE_DITTO ? up : 0]);
+    fprintf(f, "upscaler = %s\n", ups[up >= 0 && up <= UPSCALE_DITTO_EXP2 ? up : 0]);
     fprintf(f, "taa_sharpness = %.2f\n", g_settings.taa_sharpness);
     fprintf(f, "fsr3_sharpness = %.2f\n", g_settings.fsr3_sharpness);
     static const char *const presets[] = {"native", "quality", "balanced", "performance", "ultra"};

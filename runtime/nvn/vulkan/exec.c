@@ -1420,7 +1420,7 @@ static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     vk_end_pass();
     // TAA: the scene is complete when the game moves on to another colour target (its bloom): resolved there, once
-    if ((jitter_on() || g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_GSR2 || g_settings.upscaler == UPSCALE_DITTO) && ao.tex && ao.frame == fx_frame() && ao.taa_frame != ao.frame && ao.opaque >= 16 &&
+    if ((jitter_on() || g_settings.upscaler == UPSCALE_FSR3 || UPSCALE_IS_GSR2(g_settings.upscaler) || UPSCALE_IS_DITTO(g_settings.upscaler)) && ao.tex && ao.frame == fx_frame() && ao.taa_frame != ao.frame && ao.opaque >= 16 &&
         st.rt.ncolor && st.rt.color[0] && st.rt.color[0] != ao.tex)
         taa_run();
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each pass its own submission)
@@ -4916,7 +4916,7 @@ static TexBackend *post_image_fmt(int i, uint32_t w, uint32_t h, VkFormat fmt) {
                                 .format = fmt, .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1,
                                 .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
                                 .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
-        if (i == 24) ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;  // (FSR 3 writes its output from compute)
+        if (i == 24 || i == 48) ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;  // (FSR 3 writes its output from compute; 48: DittoSR Experiment's, local)
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &d->image, &d->mem, NULL));
         d->format = fmt; d->width = w; d->height = h; d->depth = 1; d->layers = 1; d->levels = 1;
@@ -5390,13 +5390,38 @@ static uint64_t taa_jit_frame = ~0ull;
 static bool fsr3_engaged;
 static uint32_t fsr3_rw, fsr3_rh, fsr3_ow;
 // (DittoSR, with FSR 3.1's inputs: as FSR 3.1 here - its jitter sequence too)
-static bool fsr3_up(void) { return g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_DITTO; }
+static bool fsr3_up(void) { return g_settings.upscaler == UPSCALE_FSR3 || UPSCALE_IS_DITTO(g_settings.upscaler); }
+static TexBackend *post_image(int i, uint32_t w, uint32_t h);
+// (LOCAL experiment, DittoSR Experiment: its line pass's strengths - dark, light, below; LARECOMP_DITTO_EXP_LINE=<d>,<l>,<b>,
+// 0: RCAS instead)
+static const float *dittosr_exp_line(void) {
+    static float p[3] = {-1, 0, 0};
+    if (p[0] < 0) {
+        const char *le = getenv("LARECOMP_DITTO_EXP_LINE");
+        p[0] = 1.0f, p[1] = 0.3f, p[2] = 0.3f;
+        if (le) sscanf(le, "%f,%f,%f", &p[0], &p[1], &p[2]);
+    }
+    return p;
+}
+// (LOCAL experiment, DittoSR Experiment: DittoSR into an image of dittosr_exp_scale() of the output's sides, never
+// below the render size; d's output sizes and *out set to it when done)
+static bool dittosr_exp_mid(VkCommandBuffer cb, Fsr3Dispatch *d, uint32_t ow, uint32_t oh, TexBackend **out) {
+    float s = dittosr_exp_scale();
+    uint32_t mw = (uint32_t)lroundf(ow * s) & ~3u, mh = (uint32_t)lroundf(oh * s) & ~3u;
+    if (mw < d->rw || mh < d->rh) mw = d->rw, mh = d->rh;
+    TexBackend *m = post_image(48, mw, mh);  // (48, 49: free - 10 / 11 are SSAO's history, 17 / 18 GI's)
+    Fsr3Dispatch e = *d;
+    e.ow = mw, e.oh = mh, e.output = m->image;
+    if (!dittosr_dispatch(cb, &e)) return false;
+    *d = e, *out = m;
+    return true;
+}
 static bool fsr3_on(void) { return fsr3_up() && fsr3_engaged; }
 // Snapdragon GSR 2 ran at the last present (gsr2_run): the scene jittered as for FSR 3.1, a Halton sequence of
 // ceil(8 x ratio^2) phases (AMD's count for the ratio, which Qualcomm's sample takes too)
 static bool gsr2_engaged;
 static uint32_t gsr2_rw, gsr2_ow;
-static bool gsr2_on(void) { return g_settings.upscaler == UPSCALE_GSR2 && gsr2_engaged; }
+static bool gsr2_on(void) { return UPSCALE_IS_GSR2(g_settings.upscaler) && gsr2_engaged; }
 static bool taa_on(void) { return AA_ON(g_settings.antialias) == AA_TAA && !fsr3_on(); }
 static bool jitter_on(void) { return taa_on() || fsr3_on() || gsr2_on(); }
 static float halton(uint32_t i, uint32_t b) {
@@ -5570,23 +5595,64 @@ static TexBackend *gsr2_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mv, 
     bool reset = !ao.prev_ok || hw != ow || hh != oh || last + 1 != renderer_present_count();
     hw = ow, hh = oh, last = renderer_present_count();
     TexBackend *mda = post_image_fmt(50, rw, rh, VK_FORMAT_R16G16B16A16_SFLOAT);
-    TexBackend *prev = post_image_fmt(51 + cur, ow, oh, VK_FORMAT_A2B10G10R10_UNORM_PACK32);
+    // (LOCAL experiment, DittoSR Experiment 2 accumulating by weight - LARECOMP_EXP2_AFAR < 0: its history RGBA16F)
+    static int acc = -1;
+    if (acc < 0) acc = getenv("LARECOMP_EXP2_AFAR") && atof(getenv("LARECOMP_EXP2_AFAR")) < 0;
+    VkFormat hf = g_settings.upscaler == UPSCALE_DITTO_EXP2 && acc ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    TexBackend *prev = post_image_fmt(51 + cur, ow, oh, hf);
     cur ^= 1;
-    TexBackend *out = post_image_fmt(51 + cur, ow, oh, VK_FORMAT_A2B10G10R10_UNORM_PACK32);
+    TexBackend *out = post_image_fmt(51 + cur, ow, oh, hf);
     float area = (float)ow * (float)oh / ((float)rw * (float)rh);
     float pc[16] = {(float)rw, (float)rh, (float)ow, (float)oh, 1.0f / (float)rw, 1.0f / (float)rh, 1.0f / (float)ow, 1.0f / (float)oh,
                     taa_jit[2], taa_jit[3], (float)ow / (float)rw, fminf(20.0f, area * area * area),
                     // tan(horizontal fov / 2), minLerpContribution (Qualcomm's sample: 0.3 once the camera stood still
                     // more than 5 frames), the reset (its output: this frame's image alone)
                     (float)rw / ((float)rh * ao.proj[1]), still > 5 ? 0.3f : 0.0f, reset ? 1.0f : 0.0f, 0};
+    // (LOCAL experiment, DittoSR Experiment 2: its own upscale - d.w its history clip width at rest, LARECOMP_EXP2_GAMMA)
     static const VkComponentMapping id = {0};
     VkImageView dv = vk_image_view(ao.depth, VK_IMAGE_VIEW_TYPE_2D, ao.depth->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
     VkImageView ci[2] = {dv, post_view(mv)};
     post_pass_view(cb, post_pipeline_ex("gsr2_convert.frag", VK_FORMAT_R16G16B16A16_SFLOAT, 0), ci, 2, post_view(mda), rw, rh, pc,
                    64, false, false);
+    // (LOCAL experiment, DittoSR Experiment 2: its knobs into the upscale's constants only, after the convert pass - it
+    // reads d.x as the field of view: 0 there marked every pixel's depth as standing out, the history all but unused)
+    bool x2 = g_settings.upscaler == UPSCALE_DITTO_EXP2;
+    // (its mode: 0 x2_upscale.frag, our reconstruction; 1 x2b_upscale.frag, GSR 2's upscale against its pattern -
+    // LARECOMP_EXP2_MODE; mode 1 takes GSR 2's parameters as they are)
+    static int x2m = -1;
+    if (x2m < 0) x2m = getenv("LARECOMP_EXP2_MODE") ? atoi(getenv("LARECOMP_EXP2_MODE")) : 0;
+    if (x2 && x2m == 0) {  // (research: LARECOMP_EXP2_ALPHA, _CONF, _GAMMA - 0 their defaults)
+        static float k[4] = {-1, 0, 0, 0};
+        if (k[0] < 0) {
+            k[3] = getenv("LARECOMP_EXP2_WIDTH") ? (float)atof(getenv("LARECOMP_EXP2_WIDTH")) : 1.4f;  // (1.4 x the narrow one)
+            k[0] = getenv("LARECOMP_EXP2_ALPHA") ? (float)atof(getenv("LARECOMP_EXP2_ALPHA")) : 0.05f;  // (at rest: as stable as GSR 2)
+            k[1] = getenv("LARECOMP_EXP2_CONF") ? (float)atof(getenv("LARECOMP_EXP2_CONF")) : 0.3f;  // (the narrow estimate from 0.3)
+            k[2] = getenv("LARECOMP_EXP2_GAMMA") ? (float)atof(getenv("LARECOMP_EXP2_GAMMA")) : 0;
+        }
+        pc[12] = k[0], pc[13] = k[1], pc[15] = k[2], pc[11] = k[3];  // (c.w: the narrow Gaussian's width x, _WIDTH)
+        // (research: LARECOMP_EXP2_JX / _JY = the jitter's sign per axis, as the image's pixels see it)
+        static float jx = 0, jy = 0;
+        if (!jx) jx = getenv("LARECOMP_EXP2_JX") ? (float)atof(getenv("LARECOMP_EXP2_JX")) : 1, jy = getenv("LARECOMP_EXP2_JY") ? (float)atof(getenv("LARECOMP_EXP2_JY")) : 1;
+        pc[8] *= jx, pc[9] *= jy;
+        static float af = -1, an = 0;  // (the share by nearness: LARECOMP_EXP2_AFAR, _ANEAR - b.xy, unread by mode 0)
+        if (af < 0) af = getenv("LARECOMP_EXP2_AFAR") ? (float)atof(getenv("LARECOMP_EXP2_AFAR")) : 0,
+                    an = getenv("LARECOMP_EXP2_ANEAR") ? (float)atof(getenv("LARECOMP_EXP2_ANEAR")) : 0;
+        pc[4] = af, pc[5] = an;
+        static int dcl = -1;  // (LARECOMP_EXP2_DCLIP=1: the depth clip at rest too, as before - b.y < 0)
+        if (dcl < 0) dcl = getenv("LARECOMP_EXP2_DCLIP") ? atoi(getenv("LARECOMP_EXP2_DCLIP")) : 0;
+        if (dcl) pc[5] = -1.0f;
+    }
+    if (x2 && x2m == 1) {  // (research, mode 1: LARECOMP_EXP2_BOX, _AMAX - 0 their defaults)
+        static float kb[2] = {-1, 0};
+        if (kb[0] < 0) {
+            kb[0] = getenv("LARECOMP_EXP2_BOX") ? (float)atof(getenv("LARECOMP_EXP2_BOX")) : 0;
+            kb[1] = getenv("LARECOMP_EXP2_AMAX") ? (float)atof(getenv("LARECOMP_EXP2_AMAX")) : 0;
+        }
+        pc[12] = kb[0], pc[15] = kb[1];
+    }
     VkImageView ui[3] = {post_view(prev), post_view(mda), raw_view(in)};
     gp_mark(cb, "ours: GSR 2 upscale");
-    post_pass_view(cb, post_pipeline_ex("gsr2_upscale.frag", VK_FORMAT_A2B10G10R10_UNORM_PACK32, 0), ui, 3, post_view(out), ow, oh, pc,
+    post_pass_view(cb, post_pipeline_ex(!x2 ? "gsr2_upscale.frag" : x2m == 1 ? "x2b_upscale.frag" : "x2_upscale.frag", hf, 0), ui, 3, post_view(out), ow, oh, pc,
                    64, false, false);
     return out;
 }
@@ -5616,16 +5682,16 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
     uint64_t fr = fx_frame();
     // (Native AA: FSR 3.1 at the same size, as anti-aliasing)
     bool fsr3 = fsr3_up() && (upscale || g_settings.fsr3_preset == FSR3_NATIVE_AA) && fsr3_available() &&
-                (g_settings.upscaler != UPSCALE_DITTO || dittosr_available()) &&
+                (!UPSCALE_IS_DITTO(g_settings.upscaler) || dittosr_available()) &&
                 ao.depth && ao.taa_frame == fr &&
                 ao.depth->width == b->width && ao.depth->height == b->height && ao.proj_frame == fr;
     // Snapdragon GSR 2: the same, without a DLL (an in-between image of frame generation: resolved against N's output, as
     // FSR 3.1's are)
-    bool gsr2 = g_settings.upscaler == UPSCALE_GSR2 && (upscale || g_settings.fsr3_preset == FSR3_NATIVE_AA) && ao.depth &&
+    bool gsr2 = UPSCALE_IS_GSR2(g_settings.upscaler) && (upscale || g_settings.fsr3_preset == FSR3_NATIVE_AA) && ao.depth &&
                 ao.taa_frame == fr && ao.depth->width == b->width && ao.depth->height == b->height && ao.proj_frame == fr;
     bool smaa = AA_ON(g_settings.antialias) == AA_SMAA && !fsr3 && !gsr2;
     bool fsr = (g_settings.upscaler == UPSCALE_FSR1 || (fsr3_up() && !fsr3) ||
-                (g_settings.upscaler == UPSCALE_GSR2 && !gsr2)) && upscale;  // (an upscale only)
+                (UPSCALE_IS_GSR2(g_settings.upscaler) && !gsr2)) && upscale;  // (an upscale only)
     float grade[3] = {g_settings.brightness, g_settings.contrast, g_settings.saturation};  // (F12 menu)
     bool color = fabsf(grade[0] - 1) > 0.005f || fabsf(grade[1] - 1) > 0.005f || fabsf(grade[2] - 1) > 0.005f;
     bool sharpen = taa_on() && !fsr && !fsr3 && !gsr2 && g_settings.taa_sharpness > 0.01f;  // (TAA softens)
@@ -5742,7 +5808,8 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
             }
             cb = vk_cmd();
         }
-        gp_mark(cb, "ours: %s%s", !fsr3 ? "GSR 2" : g_settings.upscaler == UPSCALE_DITTO ? "DittoSR" : "FSR 3.1",
+        gp_mark(cb, "ours: %s%s", !fsr3 ? "GSR 2" : g_settings.upscaler == UPSCALE_DITTO ? "DittoSR" :
+                                            g_settings.upscaler == UPSCALE_DITTO_EXP ? "DittoSR-Exp" : "FSR 3.1",
                 ip_side_post ? " side resolve (in-between)" : "");
         Fsr3Dispatch d = {.color = in->image, .depth = dr ? dr->image : VK_NULL_HANDLE, .mv = mv->image, .mask = mask,
                           .output = out ? out->image : VK_NULL_HANDLE,
@@ -5752,7 +5819,7 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
                           .mv_scale_x = -(float)b->width, .mv_scale_y = -(float)b->height,
                           .near_ = B / (A - 1), .far_ = B / (A + 1), .fov_y = 2.0f * atanf(1.0f / ao.proj[1]),
                           .meters_per_unit = 0.01f, .frame_ms = (float)(fps60_period_ns() / 1e6), .sharpness = g_settings.fsr3_sharpness,
-                          .reset = !ao.prev_ok};
+                          .reset = !ao.prev_ok, .exp = g_settings.upscaler == UPSCALE_DITTO_EXP};
         if (nh) {
             TexBackend *so = post_image(30, ow, oh);
             float ps[8] = {1.0f / (float)ow, 1.0f / (float)oh, 1.0f / (float)in->width, 1.0f / (float)in->height, TAA_HISTORY};
@@ -5761,7 +5828,15 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
             v = post_view(so), rb_ = so;
             // ... and sharpened as FSR 3.1 sharpens the real frames (RCAS, the same strength: its stops 2 - 2 x sharpness),
             // or the in-between images were softer than the real ones and the detail pulsed at the frame rate
-            if (g_settings.fsr3_sharpness > 0.01f) {
+            // (LOCAL experiment, DittoSR Experiment: its in-between images lined as its real frames, or the lines pulsed at
+            // the frame rate, darker in the real frames - LARECOMP_DITTO_EXP_MIDLINE: 0 none, 1 the line pass instead of
+            // RCAS (default), 2 RCAS then the line pass)
+            static int midline = -1;
+            if (midline < 0) midline = getenv("LARECOMP_DITTO_EXP_MIDLINE") ? atoi(getenv("LARECOMP_DITTO_EXP_MIDLINE")) : 1;
+            // (DittoSR Experiment 2 too, its own strengths: LARECOMP_EXP2_MIDLINE_P)
+            bool x2l = g_settings.upscaler == UPSCALE_DITTO_EXP2;
+            bool exp_line = midline > 0 && (x2l || (g_settings.upscaler == UPSCALE_DITTO_EXP && dittosr_exp_line()[0] > 0));
+            if (g_settings.fsr3_sharpness > 0.01f && !(exp_line && midline == 1)) {
                 TexBackend *r = post_image(31, ow, oh);
                 // (0.6 stops weaker than FSR's: the Catmull-Rom history keeps detail of its own - at FSR's strength the
                 // in-between images were 4 - 10 % sharper than the real frames, at 0.7 weaker within 3 %; research:
@@ -5777,10 +5852,60 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
                 post_pass(cb, "rcas.frag", ri_, 1, r, pr, false);
                 v = post_view(r), rb_ = r;
             }
+            if (exp_line) {  // (LOCAL experiment: DittoSR Experiment's line pass, as on its real frames)
+                // (its own strengths: the history is N's, lined already - LARECOMP_DITTO_EXP_MIDLINE_P=<d>,<l>,<b>)
+                static float mp[3] = {-1, 0, 0}, mq[3] = {-1, 0, 0};
+                if (mq[0] < 0) {
+                    mq[0] = 0.3f, mq[1] = -0.5f, mq[2] = 0.5f;  // (4x re-rendered: the face's detail 99.5 %, its lines within 1.2 of 255)
+                    if (getenv("LARECOMP_EXP2_MIDLINE_P")) sscanf(getenv("LARECOMP_EXP2_MIDLINE_P"), "%f,%f,%f", &mq[0], &mq[1], &mq[2]);
+                }
+                if (mp[0] < 0) {
+                    mp[0] = 0.6f, mp[1] = -0.5f, mp[2] = 0.6f;  // (in-between and real frames alike, as DittoSR's: 4x
+                    // re-rendered, SSAO 4, GI 3 - the face's lines within 2.2 of 255 and its detail 94 %, DittoSR's 1.8 and 94 %)
+                    if (getenv("LARECOMP_DITTO_EXP_MIDLINE_P")) sscanf(getenv("LARECOMP_DITTO_EXP_MIDLINE_P"), "%f,%f,%f", &mp[0], &mp[1], &mp[2]);
+                }
+                TexBackend *r = post_image(rb_ == so ? 31 : 30, ow, oh);
+                const float *q = x2l ? mq : mp;
+                float pl[8] = {q[0], q[1], q[2], 0, (float)ow, (float)oh};
+                VkImageView li[3] = {v};
+                post_pass(cb, "ditto_line.frag", li, 1, r, pl, false);
+                v = post_view(r), rb_ = r;
+            }
             TexBackend *u = ip_ui_keep(cb, rb_, nh, false);  // (its interface: N's, ip_ui_keep)
             v = post_view(u), rb_ = u;
+        } else if (fsr3 && !vk_tex_lo_active() && g_settings.upscaler == UPSCALE_DITTO_EXP && dittosr_exp_scale() < 0.999f &&
+                   dittosr_exp_mid(cb, &d, ow, oh, &out)) {
+            // (LOCAL experiment: DittoSR at a smaller output, out its result; EASU + RCAS from it to the window's size)
+            // (the jitter's sequence: for the ratio to d.ow, or with LARECOMP_DITTO_EXP_JIT_FULL=1 to the window's)
+            static int jf = -1;
+            if (jf < 0) jf = getenv("LARECOMP_DITTO_EXP_JIT_FULL") ? atoi(getenv("LARECOMP_DITTO_EXP_JIT_FULL")) : 0;
+            fsr3_engaged = true, fsr3_rw = b->width, fsr3_rh = b->height, fsr3_ow = jf ? ow : d.ow;
+            float iw = (float)d.ow, ih = (float)d.oh;
+            TexBackend *e = post_image(14, ow, oh), *r = post_image(49, ow, oh);
+            float pe[8] = {iw / ow, ih / oh, 0.5f * iw / ow - 0.5f, 0.5f * ih / oh - 0.5f, iw, ih};
+            VkImageView ei[3] = {post_view(out)};
+            post_pass(cb, "easu.frag", ei, 1, e, pe, false);
+            static float es = -1;
+            if (es < 0) es = getenv("LARECOMP_DITTO_EXP_RCAS") ? (float)atof(getenv("LARECOMP_DITTO_EXP_RCAS")) : 0.6f;
+            // (or the line pass: dittosr_exp_line)
+            const float *lp = dittosr_exp_line();
+            float ld = lp[0];
+            float pr[8] = {exp2f(-es), 0, 0, 0, (float)ow, (float)oh};
+            if (ld > 0) pr[0] = lp[0], pr[1] = lp[1], pr[2] = lp[2];
+            VkImageView ri_[3] = {post_view(e)};
+            post_pass(cb, ld > 0 ? "ditto_line.frag" : "rcas.frag", ri_, 1, r, pr, false);
+            v = post_view(r), rb_ = r;
+            static int uic = -1;
+            if (uic < 0) uic = getenv("LARECOMP_FSR3_UI_COMPOSITE") ? atoi(getenv("LARECOMP_FSR3_UI_COMPOSITE")) : 1;
+            if (uic && mt) {
+                TexBackend *c = post_image(37, ow, oh);
+                float pc[8] = {1.0f / (float)ow, 1.0f / (float)oh};
+                VkImageView ci[4] = {post_view(r), raw_view(in), post_view(mt)};
+                post_pass_view(cb, post_pipeline("ui_composite.frag"), ci, 3, post_view(c), ow, oh, pc, 32, false, false);
+                v = post_view(c), rb_ = c;
+            }
         } else if (fsr3 && !vk_tex_lo_active() &&
-                   (g_settings.upscaler == UPSCALE_DITTO ? dittosr_dispatch(cb, &d) : fsr3_dispatch(cb, &d))) {  // (a reduced image never: below, FSR 1)
+                   (UPSCALE_IS_DITTO(g_settings.upscaler) ? dittosr_dispatch(cb, &d) : fsr3_dispatch(cb, &d))) {  // (a reduced image never: below, FSR 1)
             // (its compute writes: the next post pass's barrier, or the end's, waits for them)
             v = post_view(out), rb_ = out;
             fsr3_engaged = true, fsr3_rw = b->width, fsr3_rh = b->height, fsr3_ow = ow;
@@ -5810,7 +5935,22 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
             static int uic = -1;
             if (uic < 0) uic = getenv("LARECOMP_FSR3_UI_COMPOSITE") ? atoi(getenv("LARECOMP_FSR3_UI_COMPOSITE")) : 1;
             bool ui = uic && mt, sharp = g_settings.fsr3_sharpness > 0.01f;
-            if (ui || sharp) {
+            if (g_settings.upscaler == UPSCALE_DITTO_EXP2) {
+                // (LOCAL experiment, DittoSR Experiment 2: the line pass and the interface in one pass, x2_final.frag - the
+                // line's strengths LARECOMP_EXP2_LINE=<dark>,<light>,<below>, the dark and light ones x 2 x the slider)
+                static float lp[3] = {-1, 0, 0};
+                if (lp[0] < 0) {
+                    lp[0] = 3.0f, lp[1] = 1.0f, lp[2] = 0.4f;  // (its upscale is softer than DittoSR's: stronger than DittoSR Experiment's)
+                    if (getenv("LARECOMP_EXP2_LINE")) sscanf(getenv("LARECOMP_EXP2_LINE"), "%f,%f,%f", &lp[0], &lp[1], &lp[2]);
+                }
+                float s2 = 2.0f * g_settings.fsr3_sharpness;
+                gp_mark(cb, "ours: GSR 2 sharpening, interface");
+                TexBackend *c = post_image(47, ow, oh);
+                float pf[8] = {lp[0] * s2, lp[1] * s2, lp[2], ui ? 1.0f : 0.0f, (float)ow, (float)oh, 1.0f / (float)ow, 1.0f / (float)oh};
+                VkImageView fi[3] = {v, raw_view(in), ui ? post_view(mt) : raw_view(in)};
+                post_pass_view(cb, post_pipeline("x2_final.frag"), fi, 3, post_view(c), ow, oh, pf, 32, false, false);
+                v = post_view(c), rb_ = c;
+            } else if (ui || sharp) {
                 gp_mark(cb, "ours: GSR 2 sharpening, interface");
                 TexBackend *c = post_image(47, ow, oh);
                 float pf[8] = {sharp ? exp2f(-2.0f * (1.0f - g_settings.fsr3_sharpness)) : 0.0f, ui ? 1.0f : 0.0f, 0, 0,
@@ -5825,6 +5965,7 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
             fsr = true;  // (FSR 1 below, this time)
         }
     }
+    if (fsr3 || gsr2) gp_mark(cb, "ours: upscaler done");  // (LOCAL experiment: the upscalers' own GPU time, to here)
     if (fsr) {
         float iw = (float)b->width, ih = (float)b->height;
         TexBackend *e = post_image(3, ow, oh), *r = post_image(4, ow, oh);
@@ -5851,7 +5992,7 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
         static uint32_t piw, pih, pow_, poh;
         static int psm = -1, pfs = -1;
         // (5: DittoSR - a switch between it and FSR 3.1 at the same sizes is a line too)
-        int f = fsr3 && fsr3_engaged ? (g_settings.upscaler == UPSCALE_DITTO ? 5 : 3) : gsr2 && gsr2_engaged ? 4 : fsr;
+        int f = fsr3 && fsr3_engaged ? (UPSCALE_IS_DITTO(g_settings.upscaler) ? 5 : 3) : gsr2 && gsr2_engaged ? 4 : fsr;
         if (!ip_side_post && (b->width != piw || b->height != pih || ow != pow_ || oh != poh || smaa != psm || f != pfs))
             LOG("[post] %ux%u%s%s -> %ux%u\n", b->width, b->height, smaa ? " smaa" : "",
                 f == 5 ? " dittosr" : f == 4 ? " gsr2" : f == 3 ? " fsr3.1" : f ? " fsr1" : "", ow, oh);
