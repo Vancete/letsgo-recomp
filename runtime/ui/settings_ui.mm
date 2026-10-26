@@ -12,7 +12,7 @@
 extern "C" {
 #include "../paths.h"
 #include "../settings.h"
-bool porysr_present(void);  // runtime/nvn/vulkan/fsr3.cpp (a local test upscaler's data is there)
+bool dittosr_present(void);  // runtime/nvn/vulkan/fsr3.cpp (a local test upscaler's data is there)
 }
 
 // ------------------------------------------------------------------ language
@@ -560,61 +560,76 @@ void ui_page_graphics(float x, bool known) {
                 "As bordas das sombras: como o jogo as desenha, suavizadas ou ainda mais suaves.",
                 "Края теней: как рисует игра, сглаженные или ещё мягче."));
     ui_group_gap();
-    // anti-aliasing: SMAA on the final image (the interface too), TAA on the scene (jittered, motion vectors:
-    // runtime/nvn/vulkan/exec.c taa_run), FSR 3.1 (temporal, the interface masked: exec.c, fsr3.cpp) or Snapdragon GSR 2
-    // (temporal, Qualcomm's: exec.c gsr2_run), the last two upscaling too, with their mode below. With the others a lower
-    // internal resolution is scaled bilinearly or by GSR 1 (settings_apply_levels).
+    // The upscaler: how the scene drawn at a lower resolution reaches the window (settings.h UPSCALE_*): bilinear;
+    // FSR 3.1 (temporal, the interface masked: exec.c, fsr3.cpp); on Android Snapdragon GSR 1 (in the present's draw:
+    // exec.c vk_present_draw) and GSR 2 (temporal, Qualcomm's: exec.c gsr2_run); DittoSR (a local test upscaler,
+    // offered only where its data is - runtime/nvn/vulkan/fsr3.cpp dittosr_present). The temporal ones take a mode below.
     {
-        // (PorySR, a local test upscaler: offered only where its data is - runtime/nvn/vulkan/fsr3.cpp porysr_present)
-        const char *aa[] = {UI_T("Off", "Desligado", "Выкл."), "SMAA", "TAA", "FSR 3.1", "Snapdragon GSR 2", "PorySR (test)"};
-        static int pory = -1;
-        if (pory < 0) pory = porysr_present();
-        ui_row(l[4], x);
-        if (ui_combo("##aa", &g_settings.antialias, aa, pory || g_settings.antialias == AA_PORY ? 6 : 5)) settings_apply_levels();
-        ui_tip(UI_T("Smooths jagged edges. SMAA: light, on the final image. TAA, FSR 3.1 and GSR 2: steadier, over several frames; FSR 3.1 and GSR 2 also draw the scene at a lower resolution and upscale it (GSR 2: Qualcomm's, lighter on phones).",
-                    "Suaviza os serrilhados. SMAA: leve, na imagem final. TAA, FSR 3.1 e GSR 2: mais estáveis, ao longo de vários quadros; o FSR 3.1 e o GSR 2 também desenham a cena numa resolução menor e a ampliam (GSR 2: da Qualcomm, mais leve em celulares).",
-                    "Сглаживает зубчатые края. SMAA: лёгкое, на итоговом кадре. TAA, FSR 3.1 и GSR 2: стабильнее, по нескольким кадрам; FSR 3.1 и GSR 2 ещё и рисуют сцену в меньшем разрешении и увеличивают её (GSR 2 от Qualcomm легче для телефонов)."));
-    }
-    // How a render resolution below the window's reaches it without a temporal upscaler: bilinear, or Snapdragon GSR 1
-    // in the present's draw (exec.c vk_present_draw, settings_apply_levels)
-    if (!AA_TEMPORAL_UPSCALE(g_settings.antialias)) {
-        const char *up[] = {UI_T("Bilinear", "Bilinear", "Билинейное"), "Snapdragon GSR"};
-        int u = g_settings.upscaler_pick == UPSCALE_GSR;
+        static int ditto = -1;
+        if (ditto < 0) ditto = dittosr_present();
+        const char *names[6];
+        int ids[6], n = 0, cur = 0;
+        names[n] = UI_T("Bilinear", "Bilinear", "Билинейное"), ids[n++] = UPSCALE_BILINEAR;
+        names[n] = "FSR 3.1", ids[n++] = UPSCALE_FSR3;
+#ifdef __ANDROID__
+        names[n] = "Snapdragon GSR", ids[n++] = UPSCALE_GSR;
+        names[n] = "Snapdragon GSR 2", ids[n++] = UPSCALE_GSR2;
+#endif
+        if (ditto || g_settings.upscaler_pick == UPSCALE_DITTO) names[n] = "DittoSR (test)", ids[n++] = UPSCALE_DITTO;
+        for (int i = 0; i < n; i++) if (ids[i] == g_settings.upscaler_pick) cur = i;
         ui_row(l[8], x);
-        if (ui_combo("##upscaler", &u, up, 2)) g_settings.upscaler_pick = u ? UPSCALE_GSR : UPSCALE_BILINEAR, settings_apply_levels();
-        ui_tip(UI_T("When the scene is drawn below the screen's resolution: Snapdragon GSR (Qualcomm's Game Super Resolution) "
-                    "keeps edges and detail sharper than bilinear, for a small cost on the GPU.",
-                    "Quando a cena é desenhada abaixo da resolução da tela: o Snapdragon GSR (Game Super Resolution da Qualcomm) "
-                    "mantém bordas e detalhes mais nítidos que o bilinear, com um custo pequeno na GPU.",
-                    "Когда сцена рисуется ниже разрешения экрана: Snapdragon GSR (Game Super Resolution от Qualcomm) "
-                    "сохраняет края и детали чётче билинейного, с небольшой нагрузкой на GPU."));
+        if (ui_combo("##upscaler", &cur, names, n)) g_settings.upscaler_pick = ids[cur], settings_apply_levels();
+        ui_tip(UI_T("How the scene, drawn below the screen's resolution, is brought up to it. Bilinear: plain. FSR 3.1 "
+                    "(and Snapdragon GSR 2 on phones): temporal, over several frames - they also smooth the edges, and draw "
+                    "the scene smaller by their mode. Snapdragon GSR: sharper edges than bilinear for a small cost.",
+                    "Como a cena, desenhada abaixo da resolução da tela, é ampliada até ela. Bilinear: simples. FSR 3.1 "
+                    "(e Snapdragon GSR 2 em celulares): temporais, ao longo de vários quadros - também suavizam as bordas e "
+                    "desenham a cena menor conforme o modo. Snapdragon GSR: bordas mais nítidas que o bilinear, com custo pequeno.",
+                    "Как сцена, нарисованная ниже разрешения экрана, увеличивается до него. Билинейное: простое. FSR 3.1 "
+                    "(и Snapdragon GSR 2 на телефонах): временные, по нескольким кадрам - они же сглаживают края и рисуют "
+                    "сцену меньше по своему режиму. Snapdragon GSR: края чётче билинейного при небольшой нагрузке."));
     }
-    // FSR 3.1's presets (GSR 2's too): the render resolution is the window's divided by the ratio (runtime/nvn/output_scale.c)
-    if (AA_TEMPORAL_UPSCALE(g_settings.antialias)) {
-        bool gsr2 = g_settings.antialias == AA_GSR2;  // (PorySR: FSR 3.1's labels - it takes its modes)
+    // a temporal upscaler's mode: the render resolution is the window's divided by the ratio (runtime/nvn/output_scale.c),
+    // and its sharpening - RCAS, AMD's robust contrast-adaptive sharpening, inside FSR 3.1 / DittoSR, our own pass after
+    // GSR 2 (rcas.frag); the frame generation's in-between images take it too (exec.c post_process_ex)
+    if (UPSCALE_TEMPORAL(g_settings.upscaler)) {
+        const char *name = g_settings.upscaler == UPSCALE_GSR2 ? "GSR 2" : g_settings.upscaler == UPSCALE_DITTO ? "DittoSR" : "FSR 3.1";
         const char *pr[] = {UI_T("Native AA (1.0x)", "AA nativo (1,0x)", "Нативное AA (1,0x)"),
                             UI_T("Quality (1.5x)", "Qualidade (1,5x)", "Качество (1,5x)"),
                             UI_T("Balanced (1.7x)", "Equilibrado (1,7x)", "Баланс (1,7x)"),
                             UI_T("Performance (2.0x)", "Desempenho (2,0x)", "Производительность (2,0x)"),
                             UI_T("Ultra Performance (3.0x)", "Ultra desempenho (3,0x)", "Макс. производительность (3,0x)")};
-        ui_row(gsr2 ? UI_T("GSR 2 mode", "Modo do GSR 2", "Режим GSR 2") : l[5], x);
+        char mode[64];
+        snprintf(mode, sizeof mode, UI_T("%s mode", "Modo do %s", "Режим %s"), name);
+        ui_row(mode, x);
         ui_combo("##fsr3p", &g_settings.fsr3_preset, pr, 5);
-        if (gsr2)
-            ui_tip(UI_T("How much lower the scene is drawn before GSR 2 upscales it: the window's size divided by the ratio. Higher ratios run faster and look softer.",
-                        "Quanto menor a cena é desenhada antes de o GSR 2 ampliá-la: o tamanho da janela dividido pela razão. Razões maiores rodam mais rápido e ficam mais suaves.",
-                        "Во сколько раз меньше рисуется сцена перед увеличением GSR 2: размер окна, делённый на коэффициент. Больший коэффициент быстрее, но мягче."));
-        else
-            ui_tip(UI_T("How much lower the scene is drawn before FSR 3.1 upscales it: the window's size divided by the ratio. Higher ratios run faster and look softer.",
-                        "Quanto menor a cena é desenhada antes de o FSR 3.1 ampliá-la: o tamanho da janela dividido pela razão. Razões maiores rodam mais rápido e ficam mais suaves.",
-                        "Во сколько раз меньше рисуется сцена перед увеличением FSR 3.1: размер окна, делённый на коэффициент. Больший коэффициент быстрее, но мягче."));
-        // its sharpening: RCAS, AMD's robust contrast-adaptive sharpening (CAS) inside FSR 3.1 (exec.c post_process; the
-        // frame generation's in-between images take it too) - after GSR 2, the same pass of ours (rcas.frag)
+        ui_tip(UI_T("How much lower the scene is drawn before the upscaler brings it up: the window's size divided by the ratio. Higher ratios run faster and look softer.",
+                    "Quanto menor a cena é desenhada antes de o ampliador a levar ao tamanho da tela: o tamanho da janela dividido pela razão. Razões maiores rodam mais rápido e ficam mais suaves.",
+                    "Во сколько раз меньше рисуется сцена перед увеличением: размер окна, делённый на коэффициент. Больший коэффициент быстрее, но мягче."));
         float pct = g_settings.fsr3_sharpness * 100;
         ui_row(l[7], x);
         if (ui_slider("##fsr3s", &pct, 0, 100, "%.0f%%", 5)) g_settings.fsr3_sharpness = pct / 100;
         ui_tip(UI_T("The upscaler's sharpening (RCAS, AMD's contrast-adaptive sharpening). 0% turns it off.",
                     "A nitidez do ampliador (RCAS, o realce adaptativo de contraste da AMD). 0% desliga.",
                     "Резкость апскейлера (RCAS, адаптивное повышение резкости AMD). 0% — выкл."));
+    }
+    // anti-aliasing: SMAA on the final image (the interface too) or TAA on the scene (jittered, motion vectors:
+    // runtime/nvn/vulkan/exec.c taa_run). A temporal upscaler anti-aliases itself: the choice is kept but set aside
+    // (settings.h AA_ON), the row disabled.
+    {
+        const char *aa[] = {UI_T("Off", "Desligado", "Выкл."), "SMAA", "TAA"};
+        bool own = UPSCALE_TEMPORAL(g_settings.upscaler);
+        ui_row(l[4], x);
+        ImGui::BeginDisabled(own);
+        if (ui_combo("##aa", &g_settings.antialias, aa, 3)) settings_apply_levels();
+        ImGui::EndDisabled();
+        if (own)
+            ui_tip(UI_T("The upscaler chosen smooths the edges itself.", "O ampliador escolhido já suaviza as bordas.",
+                        "Выбранный апскейлер сам сглаживает края."));
+        else
+            ui_tip(UI_T("Smooths jagged edges. SMAA: light, on the final image. TAA: steadier, over several frames.",
+                        "Suaviza os serrilhados. SMAA: leve, na imagem final. TAA: mais estável, ao longo de vários quadros.",
+                        "Сглаживает зубчатые края. SMAA: лёгкое, на итоговом кадре. TAA: стабильнее, по нескольким кадрам."));
     }
     // Frame generation (exec.c frame interpolation): 2, 3 or 4 images per world frame, the in-between ones drawn by
     // running the frame's draws again with their positions between the last frame's and this one's; Auto: as many as the
@@ -660,7 +675,7 @@ void ui_page_image_sound(void) {
         if (ui_slider("##v", &pct, rows[i].lo * 100, rows[i].hi * 100, "%.0f%%", 5)) *rows[i].v = pct / 100;
         ImGui::PopID();
     }
-    ImGui::BeginDisabled(g_settings.antialias != AA_TAA);  // (FSR 3.1's: the graphics page, under its mode)
+    ImGui::BeginDisabled(AA_ON(g_settings.antialias) != AA_TAA);  // (the temporal upscalers': the graphics page, under their mode)
     {
         float pct = g_settings.taa_sharpness * 100;
         ui_row(l_shp, x);

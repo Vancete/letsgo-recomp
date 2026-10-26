@@ -38,17 +38,17 @@ static struct {
 } fx = {ffxCreateContext, ffxDestroyContext, ffxConfigure, ffxQuery, ffxDispatch};
 #endif
 // (a local research hook - its header is not part of the repository: it wraps the Vulkan functions the provider asks for)
-#if __has_include("pory_capture.h")
+#if __has_include("ditto_capture.h")
 #include <stdarg.h>
-#include "pory_capture.h"
+#include "ditto_capture.h"
 #endif
-// (PorySR, a local test upscaler - its library is not part of the repository either: porysr_* below)
-#if __has_include("pory/pory_sr.h")
+// (DittoSR, a local test upscaler - its library is not part of the repository either: dittosr_* below)
+#if __has_include("ditto/ditto_sr.h")
 #ifdef __ANDROID__
 extern "C" const char *rt_data_root(void);
 #endif
-#include "pory/pory_sr.h"
-#define PORYSR 1
+#include "ditto/ditto_sr.h"
+#define DITTOSR 1
 #endif
 static int loaded = -1;  // -1 not tried, 0 missing, 1 loaded
 static ffxContext ctx;
@@ -96,8 +96,8 @@ static void VKAPI_CALL fsr3_dispatch_marked(VkCommandBuffer cb, uint32_t x, uint
 }
 static PFN_vkVoidFunction fsr3_device_proc_(VkDevice dev, const char *name);
 static PFN_vkVoidFunction VKAPI_CALL fsr3_device_proc(VkDevice dev, const char *name) {
-#ifdef PORY_CAPTURE
-    return pory::wrap(name, fsr3_device_proc_(dev, name));
+#ifdef DITTO_CAPTURE
+    return ditto::wrap(name, fsr3_device_proc_(dev, name));
 #else
     return fsr3_device_proc_(dev, name);
 #endif
@@ -215,12 +215,12 @@ extern "C" bool fsr3_dispatch(VkCommandBuffer cb, const Fsr3Dispatch *in) {
     d.viewSpaceToMetersFactor = in->meters_per_unit;
     d.flags = FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
     fsr3_pass = 0;
-#ifdef PORY_CAPTURE
-    pory::before_upscale();
+#ifdef DITTO_CAPTURE
+    ditto::before_upscale();
 #endif
     ffxReturnCode_t r = fx.Dispatch(&ctx, &d.header);
-#ifdef PORY_CAPTURE
-    pory::after_upscale(cb);
+#ifdef DITTO_CAPTURE
+    ditto::after_upscale(cb);
 #endif
     if (r != FFX_API_RETURN_OK) {
         static int n;
@@ -261,20 +261,20 @@ extern "C" void fsr3_shutdown(void) {
 #ifdef FSR3_FX
     if (ctx) { vkDeviceWaitIdle(g_vk.dev); fx.DestroyContext(&ctx, NULL); ctx = NULL; }
 #endif
-#ifdef PORYSR
-    porysr::shutdown();
+#ifdef DITTOSR
+    dittosr::shutdown();
 #endif
 }
 
-// PorySR (aa = porysr): a local test upscaler with FSR 3.1's inputs, its library and data kept out of the repository
-// (pory/pory_sr.h, <data root>/porysr/). Without them it is not offered, and chosen it falls back to FSR 1.
-extern "C" bool porysr_present(void) {  // (its data there: no GPU work - the start screen asks)
-#ifdef PORYSR
+// DittoSR (aa = dittosr): a local test upscaler with FSR 3.1's inputs, its library and data kept out of the repository
+// (ditto/ditto_sr.h, <data root>/dittosr/). Without them it is not offered, and chosen it falls back to FSR 1.
+extern "C" bool dittosr_present(void) {  // (its data there: no GPU work - the start screen asks)
+#ifdef DITTOSR
     char path[1100];
 #ifdef __ANDROID__
-    snprintf(path, sizeof path, "%s/porysr/sm_000.spv", rt_data_root());
+    snprintf(path, sizeof path, "%s/dittosr/sm_000.spv", rt_data_root());
 #else
-    snprintf(path, sizeof path, "porysr/sm_000.spv");
+    snprintf(path, sizeof path, "dittosr/sm_000.spv");
 #endif
     FILE *f = fopen(path, "rb");
     if (f) fclose(f);
@@ -283,16 +283,16 @@ extern "C" bool porysr_present(void) {  // (its data there: no GPU work - the st
     return false;
 #endif
 }
-extern "C" bool porysr_available(void) {
-#ifdef PORYSR
-    return porysr::available();
+extern "C" bool dittosr_available(void) {
+#ifdef DITTOSR
+    return dittosr::available();
 #else
     return false;
 #endif
 }
-extern "C" bool porysr_dispatch(VkCommandBuffer cb, const Fsr3Dispatch *in) {
-#ifdef PORYSR
-    return porysr::dispatch(cb, in);
+extern "C" bool dittosr_dispatch(VkCommandBuffer cb, const Fsr3Dispatch *in) {
+#ifdef DITTOSR
+    return dittosr::dispatch(cb, in);
 #else
     (void)cb, (void)in;
     return false;

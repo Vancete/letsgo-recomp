@@ -6,8 +6,12 @@
   display's highest), asked with `ANativeWindow_setFrameRate` - left at 60 Hz, 3x / 4x images were drawn and dropped.
   A warm phone may still cap it at 60 Hz (thermal policy).
 
-- **Upscaler: Snapdragon GSR** (F12 Graphics, *Upscaler*, with any anti-aliasing but FSR 3.1; `upscaler = gsr` in
-  larecomp.ini): Qualcomm's Game Super Resolution 1 (BSD 3-Clause, third_party/snapdragon-gsr) brings a render
+- **The upscalers in one setting** (F12 Graphics and the start screen, *Upscaler*; `upscaler =` in larecomp.ini):
+  Bilinear (the default), FSR 3.1, and on Android Snapdragon GSR and GSR 2. Anti-aliasing is Off / SMAA / TAA, set
+  aside (its row disabled) while a temporal upscaler - FSR 3.1, GSR 2 - smooths the edges itself; the choice is kept
+  for when the upscaler changes. FSR 3.1 was an anti-aliasing choice: an older file's `aa = fsr3` reads as the
+  upscaler, and an older version reads the new file's `upscaler = fsr3` as FSR 3.1 too.
+- **Upscaler: Snapdragon GSR** (Android; `upscaler = gsr`, with any anti-aliasing): Qualcomm's Game Super Resolution 1 (BSD 3-Clause, third_party/snapdragon-gsr) brings a render
   resolution below the window's up to it in the present's own draw - a 12-tap Lanczos-like filter with adaptive
   sharpening at edges - instead of bilinear. ~0.3 ms a frame at 2133x1200 on an Adreno 830.
 - **Android: FSR 3.1** - AMD's FidelityFX SDK 1.1.4 (MIT) built from its sources for arm64 (`make ffx-android`,
@@ -16,7 +20,7 @@
   ~4 - 5 ms of the GPU's frame (the frame 22.3 ms against 18.1 with SMAA at the same render size). Its 16-bit shader
   variants are now allowed (`shaderFloat16` enabled where the GPU has it). A profiled frame (`LARECOMP_GPUPROF_AT`) has
   a row for each FSR 3.1 pass.
-- **Anti-aliasing: Snapdragon GSR 2** (F12 Graphics / start screen, `aa = gsr2`): Qualcomm's Game Super Resolution 2
+- **Upscaler: Snapdragon GSR 2** (Android; `upscaler = gsr2`): Qualcomm's Game Super Resolution 2
   (BSD 3-Clause, its 2-pass fragment variant), temporal like FSR 3.1 and with its modes (Native AA to Ultra
   Performance), the same jitter, motion vectors, interface mask and sharpening slider (our RCAS, in one pass with the
   interface). Lighter on phones: on the Adreno 830 at 2133x1200, Performance, ~3.4 ms (motion 0.56, upscale 1.45 in

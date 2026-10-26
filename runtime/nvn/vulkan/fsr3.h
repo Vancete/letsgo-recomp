@@ -21,9 +21,9 @@ bool fsr3_dispatch(VkCommandBuffer cb, const Fsr3Dispatch *d);
 void fsr3_shutdown(void);
 // OptiScaler is injected (winmm.dll next to the exe, or LARECOMP_FSR3_OPTISCALER=1) and takes the FFX calls - fsr3.cpp
 bool fsr3_optiscaler(void);
-// PorySR (aa = porysr), a local test upscaler with FSR 3.1's inputs: its library and data are not part of the repository.
+// DittoSR (aa = dittosr), a local test upscaler with FSR 3.1's inputs: its library and data are not part of the repository.
 // present: its data is there (no GPU work); available: ready on the GPU; dispatch: as fsr3_dispatch
-bool porysr_present(void);
-bool porysr_available(void);
-bool porysr_dispatch(VkCommandBuffer cb, const Fsr3Dispatch *d);
+bool dittosr_present(void);
+bool dittosr_available(void);
+bool dittosr_dispatch(VkCommandBuffer cb, const Fsr3Dispatch *d);
 

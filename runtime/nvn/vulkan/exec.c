@@ -1360,8 +1360,7 @@ static bool mv_wanted(void) {
     static int dump = -1;
     if (dump < 0) dump = getenv("LARECOMP_MV_DUMP") != NULL;
     return g_settings.mv_debug || dump || (g_settings.ssao && g_settings.ssao_temporal) || (g_settings.gi && g_settings.gi_temporal) ||
-           g_settings.antialias == AA_TAA || g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_GSR2 ||
-           g_settings.upscaler == UPSCALE_PORY ||
+           AA_ON(g_settings.antialias) == AA_TAA || UPSCALE_TEMPORAL(g_settings.upscaler) ||
            (g_settings.frame_gen && g_settings.fg_method == FG_FLOW);  // (the optical flow starts from them: flow_prepare)
 }
 
@@ -1421,7 +1420,7 @@ static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     vk_end_pass();
     // TAA: the scene is complete when the game moves on to another colour target (its bloom): resolved there, once
-    if ((jitter_on() || g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_GSR2 || g_settings.upscaler == UPSCALE_PORY) && ao.tex && ao.frame == fx_frame() && ao.taa_frame != ao.frame && ao.opaque >= 16 &&
+    if ((jitter_on() || g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_GSR2 || g_settings.upscaler == UPSCALE_DITTO) && ao.tex && ao.frame == fx_frame() && ao.taa_frame != ao.frame && ao.opaque >= 16 &&
         st.rt.ncolor && st.rt.color[0] && st.rt.color[0] != ao.tex)
         taa_run();
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each pass its own submission)
@@ -5390,15 +5389,15 @@ static uint64_t taa_jit_frame = ~0ull;
 // its motion vectors and depth handed to it; TAA steps aside (FSR anti-aliases)
 static bool fsr3_engaged;
 static uint32_t fsr3_rw, fsr3_rh, fsr3_ow;
-// (PorySR, with FSR 3.1's inputs: as FSR 3.1 here - its jitter sequence too)
-static bool fsr3_up(void) { return g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_PORY; }
+// (DittoSR, with FSR 3.1's inputs: as FSR 3.1 here - its jitter sequence too)
+static bool fsr3_up(void) { return g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_DITTO; }
 static bool fsr3_on(void) { return fsr3_up() && fsr3_engaged; }
 // Snapdragon GSR 2 ran at the last present (gsr2_run): the scene jittered as for FSR 3.1, a Halton sequence of
 // ceil(8 x ratio^2) phases (AMD's count for the ratio, which Qualcomm's sample takes too)
 static bool gsr2_engaged;
 static uint32_t gsr2_rw, gsr2_ow;
 static bool gsr2_on(void) { return g_settings.upscaler == UPSCALE_GSR2 && gsr2_engaged; }
-static bool taa_on(void) { return g_settings.antialias == AA_TAA && !fsr3_on(); }
+static bool taa_on(void) { return AA_ON(g_settings.antialias) == AA_TAA && !fsr3_on(); }
 static bool jitter_on(void) { return taa_on() || fsr3_on() || gsr2_on(); }
 static float halton(uint32_t i, uint32_t b) {
     float f = 1, r = 0;
@@ -5617,14 +5616,14 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
     uint64_t fr = fx_frame();
     // (Native AA: FSR 3.1 at the same size, as anti-aliasing)
     bool fsr3 = fsr3_up() && (upscale || g_settings.fsr3_preset == FSR3_NATIVE_AA) && fsr3_available() &&
-                (g_settings.upscaler != UPSCALE_PORY || porysr_available()) &&
+                (g_settings.upscaler != UPSCALE_DITTO || dittosr_available()) &&
                 ao.depth && ao.taa_frame == fr &&
                 ao.depth->width == b->width && ao.depth->height == b->height && ao.proj_frame == fr;
     // Snapdragon GSR 2: the same, without a DLL (an in-between image of frame generation: resolved against N's output, as
     // FSR 3.1's are)
     bool gsr2 = g_settings.upscaler == UPSCALE_GSR2 && (upscale || g_settings.fsr3_preset == FSR3_NATIVE_AA) && ao.depth &&
                 ao.taa_frame == fr && ao.depth->width == b->width && ao.depth->height == b->height && ao.proj_frame == fr;
-    bool smaa = g_settings.antialias == AA_SMAA && !fsr3 && !gsr2;
+    bool smaa = AA_ON(g_settings.antialias) == AA_SMAA && !fsr3 && !gsr2;
     bool fsr = (g_settings.upscaler == UPSCALE_FSR1 || (fsr3_up() && !fsr3) ||
                 (g_settings.upscaler == UPSCALE_GSR2 && !gsr2)) && upscale;  // (an upscale only)
     float grade[3] = {g_settings.brightness, g_settings.contrast, g_settings.saturation};  // (F12 menu)
@@ -5743,7 +5742,7 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
             }
             cb = vk_cmd();
         }
-        gp_mark(cb, "ours: %s%s", !fsr3 ? "GSR 2" : g_settings.upscaler == UPSCALE_PORY ? "PorySR" : "FSR 3.1",
+        gp_mark(cb, "ours: %s%s", !fsr3 ? "GSR 2" : g_settings.upscaler == UPSCALE_DITTO ? "DittoSR" : "FSR 3.1",
                 ip_side_post ? " side resolve (in-between)" : "");
         Fsr3Dispatch d = {.color = in->image, .depth = dr ? dr->image : VK_NULL_HANDLE, .mv = mv->image, .mask = mask,
                           .output = out ? out->image : VK_NULL_HANDLE,
@@ -5781,7 +5780,7 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
             TexBackend *u = ip_ui_keep(cb, rb_, nh, false);  // (its interface: N's, ip_ui_keep)
             v = post_view(u), rb_ = u;
         } else if (fsr3 && !vk_tex_lo_active() &&
-                   (g_settings.upscaler == UPSCALE_PORY ? porysr_dispatch(cb, &d) : fsr3_dispatch(cb, &d))) {  // (a reduced image never: below, FSR 1)
+                   (g_settings.upscaler == UPSCALE_DITTO ? dittosr_dispatch(cb, &d) : fsr3_dispatch(cb, &d))) {  // (a reduced image never: below, FSR 1)
             // (its compute writes: the next post pass's barrier, or the end's, waits for them)
             v = post_view(out), rb_ = out;
             fsr3_engaged = true, fsr3_rw = b->width, fsr3_rh = b->height, fsr3_ow = ow;
@@ -5851,10 +5850,11 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
     {
         static uint32_t piw, pih, pow_, poh;
         static int psm = -1, pfs = -1;
-        int f = fsr3 && fsr3_engaged ? 3 : gsr2 && gsr2_engaged ? 4 : fsr;
+        // (5: DittoSR - a switch between it and FSR 3.1 at the same sizes is a line too)
+        int f = fsr3 && fsr3_engaged ? (g_settings.upscaler == UPSCALE_DITTO ? 5 : 3) : gsr2 && gsr2_engaged ? 4 : fsr;
         if (!ip_side_post && (b->width != piw || b->height != pih || ow != pow_ || oh != poh || smaa != psm || f != pfs))
             LOG("[post] %ux%u%s%s -> %ux%u\n", b->width, b->height, smaa ? " smaa" : "",
-                f == 4 ? " gsr2" : f == 3 ? (g_settings.upscaler == UPSCALE_PORY ? " porysr" : " fsr3.1") : f ? " fsr1" : "", ow, oh);
+                f == 5 ? " dittosr" : f == 4 ? " gsr2" : f == 3 ? " fsr3.1" : f ? " fsr1" : "", ow, oh);
         if (!ip_side_post) piw = b->width, pih = b->height, pow_ = ow, poh = oh, psm = smaa, pfs = f;  // (the real frames')
     }
     return v;

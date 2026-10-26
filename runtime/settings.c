@@ -62,12 +62,13 @@ Settings g_settings = {
     .render_thread = true,
     .vertex_read = VREAD_AUTO,
     .upscaler = UPSCALE_SHARP,
-    .upscaler_pick = UPSCALE_SHARP,
+    .upscaler_pick = UPSCALE_BILINEAR,
     .antialias = AA_SMAA,  // (the game has no anti-aliasing of its own)
 };
 
 // Unknown keys (an older larecomp.ini: Link's Awakening's options from LAS Recomp) are ignored, and dropped at the
 // next save.
+static bool aa_upscaled;  // (this file's "aa" named an upscaler: an older file - its "upscaler" line, then, is not)
 static void parse_line(const char *line) {
     char key[64];
     char val[1100];  // (the mods list can be long)
@@ -127,18 +128,22 @@ static void parse_line(const char *line) {
                               !strcmp(val, "50%") ? RES_Q50 : !strcmp(val, "25%") ? RES_Q25 :
                               (n >= 1 && n <= 4) ? n : n > 4 ? 4 : RES_MATCH;
     }
-    // (after "aa" in the file. An older file's "fsr3": FSR 3.1 is an anti-aliasing choice now)
+    // (after "aa" in the file; older files' FSR 1: bilinear. Files of the versions with FSR 3.1 / GSR 2 / DittoSR as
+    // anti-aliasing choices have "aa = fsr3" and the like and then "upscaler = bilinear" or "gsr": the "aa" one stands)
     else if (!strcmp(key, "upscaler")) {
-        if (!strcmp(val, "fsr3")) g_settings.antialias = AA_FSR3;
-        else g_settings.upscaler_pick = !strcmp(val, "gsr") ? UPSCALE_GSR : UPSCALE_BILINEAR;  // (older files' FSR 1: bilinear)
+        int u = !strcmp(val, "fsr3") ? UPSCALE_FSR3 : !strcmp(val, "gsr") ? UPSCALE_GSR : !strcmp(val, "gsr2") ? UPSCALE_GSR2 :
+                !strcmp(val, "dittosr") ? UPSCALE_DITTO : UPSCALE_BILINEAR;
+        if (!aa_upscaled || UPSCALE_TEMPORAL(u)) g_settings.upscaler_pick = u;
     }
     // (an older "antialias = off" was only LAS Recomp's default being saved: a new key, so SMAA starts on)
     else if (!strcmp(key, "smaa")) g_settings.antialias = atoi(val) != 0 ? AA_SMAA : AA_OFF;
     // (after "smaa" in the file: the choice among the three; "smaa" stays for older versions)
-    else if (!strcmp(key, "aa"))
-        g_settings.antialias = !strcmp(val, "fsr3") ? AA_FSR3 : !strcmp(val, "gsr2") ? AA_GSR2 : !strcmp(val, "porysr") ? AA_PORY :
-                               !strcmp(val, "taa") ? AA_TAA :
-                               !strcmp(val, "smaa") ? AA_SMAA : AA_OFF;
+    else if (!strcmp(key, "aa")) {
+        // (the temporal upscalers were anti-aliasing choices: such a file's upscaler)
+        int u = !strcmp(val, "fsr3") ? UPSCALE_FSR3 : !strcmp(val, "gsr2") ? UPSCALE_GSR2 : !strcmp(val, "dittosr") ? UPSCALE_DITTO : -1;
+        if (u >= 0) g_settings.upscaler_pick = u, aa_upscaled = true;
+        else g_settings.antialias = !strcmp(val, "taa") ? AA_TAA : !strcmp(val, "smaa") ? AA_SMAA : AA_OFF;
+    }
     else if (!strcmp(key, "taa_sharpness")) g_settings.taa_sharpness = (float)atof(val);
     else if (!strcmp(key, "fsr3_sharpness")) g_settings.fsr3_sharpness = (float)atof(val);
     else if (!strcmp(key, "fsr3_preset"))
@@ -219,10 +224,13 @@ void settings_apply_levels(void) {
         g_settings.gi_rays = gi_rays[g], g_settings.gi_steps = gi_steps[g], g_settings.gi_div = gi_div[g];
         g_settings.gi_intensity = 2.0f, g_settings.gi_radius = 300.0f, g_settings.gi_thickness = 25.0f, g_settings.gi_temporal = true;
     }
-    if (g_settings.antialias < AA_OFF || g_settings.antialias > AA_PORY) g_settings.antialias = AA_SMAA;
-    if (g_settings.upscaler_pick != UPSCALE_GSR) g_settings.upscaler_pick = UPSCALE_BILINEAR;
-    g_settings.upscaler = g_settings.antialias == AA_FSR3 ? UPSCALE_FSR3 : g_settings.antialias == AA_GSR2 ? UPSCALE_GSR2 :
-                          g_settings.antialias == AA_PORY ? UPSCALE_PORY : g_settings.upscaler_pick;
+    if (g_settings.antialias < AA_OFF || g_settings.antialias > AA_TAA) g_settings.antialias = AA_SMAA;
+    int u = g_settings.upscaler_pick;
+    if (u != UPSCALE_FSR3 && u != UPSCALE_GSR && u != UPSCALE_GSR2 && u != UPSCALE_DITTO) g_settings.upscaler_pick = u = UPSCALE_BILINEAR;
+#ifndef __ANDROID__
+    if (u == UPSCALE_GSR || u == UPSCALE_GSR2) u = UPSCALE_BILINEAR;  // (Snapdragon GSR: the phones' upscalers)
+#endif
+    g_settings.upscaler = u;
     if (g_settings.frame_gen != FG_AUTO && (g_settings.frame_gen < 2 || g_settings.frame_gen > 4)) g_settings.frame_gen = 0;
     if (g_settings.fg_method != FG_FLOW) g_settings.fg_method = FG_RERENDER;
 }
@@ -282,11 +290,11 @@ void settings_save(void) {
     fprintf(f, "fps = %d\n", g_settings.fps);
     fprintf(f, "render_height = %d\n", g_settings.res_height);
     fprintf(f, "smaa = %d\n", g_settings.antialias != AA_OFF);
-    fprintf(f, "aa = %s\n", g_settings.antialias == AA_FSR3 ? "fsr3" : g_settings.antialias == AA_GSR2 ? "gsr2" :
-                            g_settings.antialias == AA_PORY ? "porysr" :
-                            g_settings.antialias == AA_TAA ? "taa" :
-                            g_settings.antialias == AA_SMAA ? "smaa" : "off");
-    fprintf(f, "upscaler = %s\n", g_settings.upscaler_pick == UPSCALE_GSR ? "gsr" : "bilinear");  // (FSR 3.1: "aa")
+    fprintf(f, "aa = %s\n", g_settings.antialias == AA_TAA ? "taa" : g_settings.antialias == AA_SMAA ? "smaa" : "off");
+    // (an older version reads "fsr3" here as FSR 3.1, the others as bilinear)
+    static const char *const ups[] = {"bilinear", "bilinear", "bilinear", "fsr3", "gsr", "gsr2", "dittosr"};
+    int up = g_settings.upscaler_pick;
+    fprintf(f, "upscaler = %s\n", ups[up >= 0 && up <= UPSCALE_DITTO ? up : 0]);
     fprintf(f, "taa_sharpness = %.2f\n", g_settings.taa_sharpness);
     fprintf(f, "fsr3_sharpness = %.2f\n", g_settings.fsr3_sharpness);
     static const char *const presets[] = {"native", "quality", "balanced", "performance", "ultra"};

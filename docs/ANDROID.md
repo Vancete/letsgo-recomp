@@ -193,7 +193,7 @@ the motion vectors and the interface mask (exec.c post_process_ex). Measured on 
   `shaderFloat16`); the Adreno reports 64-wide waves only, so no wave64 variants. On a tiler its compute passes'
   timestamps don't split the time between them (the last pass's row takes ~9 ms of work done before it), so the cost
   above is the frame against SMAA at the same render size.
-- **Snapdragon GSR 2** (Qualcomm, BSD 3-Clause; `aa = gsr2`): its 2-pass fragment variant (shaders.c gsr2_*.frag), the
+- **Snapdragon GSR 2** (Qualcomm, BSD 3-Clause; `upscaler = gsr2`): its 2-pass fragment variant (shaders.c gsr2_*.frag), the
   upscale in half precision as Qualcomm's - in full precision it took 2.5 ms instead of 1.45 - with a 10-bit history
   (gsr2_run), then our RCAS and the interface composite in one pass (two passes: 1 ms each).
 - With frame generation (re-rendering, 2x) both hold 60 images a second, the game at 30: the in-between images are
