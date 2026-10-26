@@ -5595,19 +5595,16 @@ static TexBackend *gsr2_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mv, 
     bool reset = !ao.prev_ok || hw != ow || hh != oh || last + 1 != renderer_present_count();
     hw = ow, hh = oh, last = renderer_present_count();
     TexBackend *mda = post_image_fmt(50, rw, rh, VK_FORMAT_R16G16B16A16_SFLOAT);
-    // (LOCAL experiment, DittoSR Experiment 2 accumulating by weight - LARECOMP_EXP2_AFAR < 0: its history RGBA16F)
-    static int acc = -1;
-    if (acc < 0) acc = getenv("LARECOMP_EXP2_AFAR") && atof(getenv("LARECOMP_EXP2_AFAR")) < 0;
-    VkFormat hf = g_settings.upscaler == UPSCALE_DITTO_EXP2 && acc ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+    VkFormat hf = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
     TexBackend *prev = post_image_fmt(51 + cur, ow, oh, hf);
     cur ^= 1;
     TexBackend *out = post_image_fmt(51 + cur, ow, oh, hf);
     float area = (float)ow * (float)oh / ((float)rw * (float)rh);
-    float pc[16] = {(float)rw, (float)rh, (float)ow, (float)oh, 1.0f / (float)rw, 1.0f / (float)rh, 1.0f / (float)ow, 1.0f / (float)oh,
+    float pc[20] = {(float)rw, (float)rh, (float)ow, (float)oh, 1.0f / (float)rw, 1.0f / (float)rh, 1.0f / (float)ow, 1.0f / (float)oh,
                     taa_jit[2], taa_jit[3], (float)ow / (float)rw, fminf(20.0f, area * area * area),
                     // tan(horizontal fov / 2), minLerpContribution (Qualcomm's sample: 0.3 once the camera stood still
                     // more than 5 frames), the reset (its output: this frame's image alone)
-                    (float)rw / ((float)rh * ao.proj[1]), still > 5 ? 0.3f : 0.0f, reset ? 1.0f : 0.0f, 0};
+                    (float)rw / ((float)rh * ao.proj[1]), still > 5 ? 0.3f : 0.0f, reset ? 1.0f : 0.0f, 0, 0, 0, 0, 0};
     // (LOCAL experiment, DittoSR Experiment 2: its own upscale - d.w its history clip width at rest, LARECOMP_EXP2_GAMMA)
     static const VkComponentMapping id = {0};
     VkImageView dv = vk_image_view(ao.depth, VK_IMAGE_VIEW_TYPE_2D, ao.depth->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -5638,9 +5635,14 @@ static TexBackend *gsr2_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mv, 
         if (af < 0) af = getenv("LARECOMP_EXP2_AFAR") ? (float)atof(getenv("LARECOMP_EXP2_AFAR")) : 0,
                     an = getenv("LARECOMP_EXP2_ANEAR") ? (float)atof(getenv("LARECOMP_EXP2_ANEAR")) : 0;
         pc[4] = af, pc[5] = an;
-        static int dcl = -1;  // (LARECOMP_EXP2_DCLIP=1: the depth clip at rest too, as before - b.y < 0)
-        if (dcl < 0) dcl = getenv("LARECOMP_EXP2_DCLIP") ? atoi(getenv("LARECOMP_EXP2_DCLIP")) : 0;
-        if (dcl) pc[5] = -1.0f;
+        // (the reaction to changes, the edge-directed Gaussian, thin lines kept: LARECOMP_EXP2_REACT, _EDGE, _LOCK - e)
+        static float ke[3] = {-1, 0, 0};
+        if (ke[0] < 0) {
+            ke[0] = getenv("LARECOMP_EXP2_REACT") ? (float)atof(getenv("LARECOMP_EXP2_REACT")) : 1;  // (the menu closed: 10 frames late -> as DittoSR)
+            ke[1] = getenv("LARECOMP_EXP2_EDGE") ? (float)atof(getenv("LARECOMP_EXP2_EDGE")) : 1;
+            ke[2] = getenv("LARECOMP_EXP2_LOCK") ? (float)atof(getenv("LARECOMP_EXP2_LOCK")) : 0;
+        }
+        pc[16] = ke[0], pc[17] = ke[1], pc[18] = ke[2];
     }
     if (x2 && x2m == 1) {  // (research, mode 1: LARECOMP_EXP2_BOX, _AMAX - 0 their defaults)
         static float kb[2] = {-1, 0};
@@ -5653,7 +5655,7 @@ static TexBackend *gsr2_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mv, 
     VkImageView ui[3] = {post_view(prev), post_view(mda), raw_view(in)};
     gp_mark(cb, "ours: GSR 2 upscale");
     post_pass_view(cb, post_pipeline_ex(!x2 ? "gsr2_upscale.frag" : x2m == 1 ? "x2b_upscale.frag" : "x2_upscale.frag", hf, 0), ui, 3, post_view(out), ow, oh, pc,
-                   64, false, false);
+                   x2 && x2m == 0 ? 80 : 64, false, false);
     return out;
 }
 static TexBackend *hold_copy_into(TexBackend *d, TexBackend *src);
@@ -5704,7 +5706,11 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
         float off = env != -99 ? env : fsr3 || gsr2 ? -1.0f : -0.5f;
         float mb = temporal && off != 0 ? log2f((float)b->width / (float)ow) + off : 0;
         mb = roundf(mb * 4) / 4;
-        mb = mb < -2 ? -2 : mb > 0 ? 0 : mb;
+        // (LOCAL experiment, DittoSR Experiment 2: its own floor, LARECOMP_EXP2_MIPMIN - at 3x the ratio asks -2.6)
+        static float x2mip = 1;
+        if (x2mip > 0) x2mip = getenv("LARECOMP_EXP2_MIPMIN") ? (float)atof(getenv("LARECOMP_EXP2_MIPMIN")) : -2.6f;
+        float mlo = g_settings.upscaler == UPSCALE_DITTO_EXP2 ? x2mip : -2.0f;
+        mb = mb < mlo ? mlo : mb > 0 ? 0 : mb;
         if (mb != g_mip_bias) LOG("[post] mip bias %.2f\n", mb);
         g_mip_bias = mb;
     }
