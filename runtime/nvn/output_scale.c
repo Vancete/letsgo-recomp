@@ -100,7 +100,15 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
         else if (mode == RES_Q50) h *= 0.5;
     }
     h = fmax(h, 0.1);  // (.25x of a small window)
+    // The temporal upscalers: a scale that makes the Switch's 1920 x 1080 whole pixels, a multiple of 4 on each side.
+    // The render targets are rounded to whole pixels (textures.c) but the game draws at the exact scale: Balanced's
+    // 1 / 1.7 at 4K drew 2258.8 x 1270.6 into 2259 x 1271, a stretch the upscaler does not know of - its history blurred
+    // (FSR 3.1, GSR 2, DittoSR alike). 4K Balanced: 2240 x 1260, 1.71x; the other presets were whole already.
+    bool snap = forced <= 0 && (g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_GSR2 ||
+                                g_settings.upscaler == UPSCALE_DITTO);
+    if (snap && !reshape) h = fmax(round(h * 30) / 30, 1.0 / 30);
     double sx = h * shape, sy = h;
+    if (snap && reshape) sx = fmax(round(sx * 480) / 480, 1.0 / 480), sy = fmax(round(sy * 270) / 270, 1.0 / 270);
     double cap = fmin(MAX_TEX / (1920.0 * sx), MAX_TEX / (1080.0 * sy));
     if (cap < 1.0) { sx *= cap; sy *= cap; }
     o->sx = sx; o->sy = sy; o->shape = shape;
