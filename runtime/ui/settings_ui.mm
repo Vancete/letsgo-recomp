@@ -561,8 +561,8 @@ void ui_page_graphics(float x, bool known) {
                 "Края теней: как рисует игра, сглаженные или ещё мягче."));
     ui_group_gap();
     // The upscaler: how the scene drawn at a lower resolution reaches the window (settings.h UPSCALE_*): bilinear;
-    // FSR 3.1 (temporal, the interface masked: exec.c, fsr3.cpp); on Android Snapdragon GSR 1 (in the present's draw:
-    // exec.c vk_present_draw) and GSR 2 (temporal, Qualcomm's: exec.c gsr2_run); DittoSR (a local test upscaler,
+    // FSR 3.1 (temporal, the interface masked: exec.c, fsr3.cpp); Snapdragon GSR 2 (temporal, Qualcomm's: exec.c gsr2_run);
+    // on Android Snapdragon GSR 1 (in the present's draw: exec.c vk_present_draw); DittoSR (a local test upscaler,
     // offered only where its data is - runtime/nvn/vulkan/fsr3.cpp dittosr_present). The temporal ones take a mode below.
     {
         static int ditto = -1;
@@ -570,24 +570,24 @@ void ui_page_graphics(float x, bool known) {
         const char *names[6];
         int ids[6], n = 0, cur = 0;
         names[n] = UI_T("Bilinear", "Bilinear", "Билинейное"), ids[n++] = UPSCALE_BILINEAR;
-        names[n] = "FSR 3.1", ids[n++] = UPSCALE_FSR3;
 #ifdef __ANDROID__
         names[n] = "Snapdragon GSR", ids[n++] = UPSCALE_GSR;
-        names[n] = "Snapdragon GSR 2", ids[n++] = UPSCALE_GSR2;
 #endif
-        if (ditto || g_settings.upscaler_pick == UPSCALE_DITTO) names[n] = "DittoSR (test)", ids[n++] = UPSCALE_DITTO;
+        names[n] = "Snapdragon GSR 2", ids[n++] = UPSCALE_GSR2;
+        names[n] = "FSR 3.1", ids[n++] = UPSCALE_FSR3;
+        if (ditto || g_settings.upscaler_pick == UPSCALE_DITTO) names[n] = "DittoSR", ids[n++] = UPSCALE_DITTO;
         for (int i = 0; i < n; i++) if (ids[i] == g_settings.upscaler_pick) cur = i;
         ui_row(l[8], x);
         if (ui_combo("##upscaler", &cur, names, n)) g_settings.upscaler_pick = ids[cur], settings_apply_levels();
         ui_tip(UI_T("How the scene, drawn below the screen's resolution, is brought up to it. Bilinear: plain. FSR 3.1 "
-                    "(and Snapdragon GSR 2 on phones): temporal, over several frames - they also smooth the edges, and draw "
-                    "the scene smaller by their mode. Snapdragon GSR: sharper edges than bilinear for a small cost.",
+                    "and Snapdragon GSR 2 (lighter): temporal, over several frames - they also smooth the edges, and draw "
+                    "the scene smaller by their mode. Snapdragon GSR (phones): sharper edges than bilinear for a small cost.",
                     "Como a cena, desenhada abaixo da resolução da tela, é ampliada até ela. Bilinear: simples. FSR 3.1 "
-                    "(e Snapdragon GSR 2 em celulares): temporais, ao longo de vários quadros - também suavizam as bordas e "
-                    "desenham a cena menor conforme o modo. Snapdragon GSR: bordas mais nítidas que o bilinear, com custo pequeno.",
+                    "e Snapdragon GSR 2 (mais leve): temporais, ao longo de vários quadros - também suavizam as bordas e "
+                    "desenham a cena menor conforme o modo. Snapdragon GSR (celulares): bordas mais nítidas que o bilinear, com custo pequeno.",
                     "Как сцена, нарисованная ниже разрешения экрана, увеличивается до него. Билинейное: простое. FSR 3.1 "
-                    "(и Snapdragon GSR 2 на телефонах): временные, по нескольким кадрам - они же сглаживают края и рисуют "
-                    "сцену меньше по своему режиму. Snapdragon GSR: края чётче билинейного при небольшой нагрузке."));
+                    "и Snapdragon GSR 2 (легче): временные, по нескольким кадрам - они же сглаживают края и рисуют "
+                    "сцену меньше по своему режиму. Snapdragon GSR (телефоны): края чётче билинейного при небольшой нагрузке."));
     }
     // a temporal upscaler's mode: the render resolution is the window's divided by the ratio (runtime/nvn/output_scale.c),
     // and its sharpening - RCAS, AMD's robust contrast-adaptive sharpening, inside FSR 3.1 / DittoSR, our own pass after

@@ -15,7 +15,7 @@ enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25
 // The Upscaler setting: how the scene drawn at a lower resolution reaches the window. Bilinear (the default); FSR 3.1:
 // temporal, it anti-aliases too (AMD FidelityFX, runtime/nvn/vulkan/fsr3.cpp), FSR 1 when its library is missing;
 // GSR: Snapdragon Game Super Resolution 1 in the present's draw (exec.c vk_present_draw), with any anti-aliasing;
-// GSR2: Snapdragon Game Super Resolution 2, temporal (exec.c gsr2_run) - both GSR on Android only (elsewhere bilinear);
+// GSR2: Snapdragon Game Super Resolution 2, temporal (exec.c gsr2_run) - GSR 1 on Android only (elsewhere bilinear);
 // DITTO: DittoSR, a local test upscaler with FSR 3.1's inputs (runtime/nvn/vulkan/fsr3.cpp dittosr_*), FSR 1 without it
 enum { UPSCALE_BILINEAR = 0, UPSCALE_FSR1 = 2 /* AMD FSR 1 */, UPSCALE_FSR3 = 3, UPSCALE_GSR = 4, UPSCALE_GSR2 = 5, UPSCALE_DITTO = 6 };
 // the temporal upscalers: they anti-alias the image themselves (the anti-aliasing setting is set aside) and take a mode

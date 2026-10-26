@@ -228,7 +228,7 @@ void settings_apply_levels(void) {
     int u = g_settings.upscaler_pick;
     if (u != UPSCALE_FSR3 && u != UPSCALE_GSR && u != UPSCALE_GSR2 && u != UPSCALE_DITTO) g_settings.upscaler_pick = u = UPSCALE_BILINEAR;
 #ifndef __ANDROID__
-    if (u == UPSCALE_GSR || u == UPSCALE_GSR2) u = UPSCALE_BILINEAR;  // (Snapdragon GSR: the phones' upscalers)
+    if (u == UPSCALE_GSR) u = UPSCALE_BILINEAR;  // (Snapdragon GSR 1: the phones' upscaler)
 #endif
     g_settings.upscaler = u;
     if (g_settings.frame_gen != FG_AUTO && (g_settings.frame_gen < 2 || g_settings.frame_gen > 4)) g_settings.frame_gen = 0;
