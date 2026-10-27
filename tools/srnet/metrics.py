@@ -1,16 +1,17 @@
 """The measurements of measure.sh's runs: python metrics.py <out> [names...]
 
-Per upscaler and mode (Performance 2x, Ultra Performance 3x):
-  gpu      its own GPU time: the profile's rows from "ours: post" to "ours: upscaler done" (median of the frames
+Per upscaler and mode (those measured: Quality 1.5x ... Ultra Performance 3x), and native 4K (no upscaler) first:
+  upsc ms  its own GPU time: the profile's rows from "ours: post" to "ours: upscaler done" (median of the frames
            after the first)
-  still    against Native AA (nat/, DittoSR at Native AA): SSIM, PSNR (luma) and detail (mean |Laplacian| as a share
+  frame    the whole frame's GPU time (first to last mark, median)
+  still    against native 4K (nat/: no upscaler, SMAA): SSIM, PSNR (luma) and detail (mean |Laplacian| as a share
            of the reference's) in crops of scenery that does not move
   shimmer  frame-to-frame change at rest over 6 consecutive frames: the mean |luma difference| in the fence crop and
            over all the crops
   noise    fine noise in flat areas in motion: the mean |Laplacian| where the 8-pixel neighbourhood barely changes
            (the whole moving frame, the interface's corner left out)
-  settle   after the game's menu closes (frame 1560): the mean |luma difference| to the settled frame (1600) at 1566,
-           1570 and 1575, and the first frame from 1566 on below 1.0
+  settle   (when measured) after the game's menu closes (frame 1560): the mean |luma difference| to the settled frame
+           (1600) at 1566, 1570 and 1575
 Luma: BT.601, 0..255 (as ffmpeg's gray); the crops as the earlier sessions' scripts.
 """
 import os
@@ -87,13 +88,43 @@ def gpu_ms(log):
     return [f for f in frames if f[0] > 0][1:]
 
 
+def frame_ms(log):
+    """The frame's GPU time per profiled frame (first to last mark), median, the first frame left out."""
+    t = [float(m.group(1)) for m in re.finditer(r"marks, ([\d.]+) ms first to last", open(log, encoding="utf-8", errors="replace").read())]
+    t = t[1:] if len(t) > 2 else t
+    return statistics.median(t) if t else float("nan")
+
+
+def stability(d):
+    """(the fence's shimmer, all the crops') over the 6 consecutive images at rest in d."""
+    fs = [luma(os.path.join(d, f"fin_{i}.png")) for i in range(1596, 1602)]
+    sh = {k: np.mean([np.abs(crop(a, c) - crop(b, c)).mean() for a, b in zip(fs, fs[1:])]) for k, c in SHIMMER.items()}
+    return sh["fence"], float(np.mean(list(sh.values())))
+
+
+def noise(path):
+    p = luma(path)[:1960]
+    cen = p[8:-8, 8:-8]
+    wide = np.abs(p[8:-8, 16:] - p[8:-8, :-16]) + np.abs(p[16:, 8:-8] - p[:-16, 8:-8])
+    lp = np.abs(4 * cen - p[8:-8, 7:-9] - p[8:-8, 9:-7] - p[7:-9, 8:-8] - p[9:-7, 8:-8])
+    return float(lp[wide <= 6].mean())
+
+
+MODES = {"quality": "1.5x", "balanced": "1.7x", "performance": "2x", "ultra": "3x"}
+
+
 def main():
     out = sys.argv[1]
-    names = sys.argv[2:] or ["gsr2", "x2", "net", "dexp", "dit"]
+    names = sys.argv[2:] or ["fsr3", "ditto", "fsr4", "net"]
     ref = luma(os.path.join(out, "nat", "window.png"))
-    print(f"{'mode':5s} {'upscaler':8s} {'gpu ms':>7s} | {'SSIM':>6s} {'PSNR':>6s} {'detail':>7s} | {'fence':>6s} {'all':>6s} | "
-          f"{'noise':>6s} | settle 1566 1570 1575 (first < 1)")
-    for pre, tag in (("performance", "2x"), ("ultra", "3x")):
+    print(f"{'mode':5s} {'upscaler':8s} {'upsc ms':>7s} {'frame':>6s} | {'SSIM':>6s} {'PSNR':>6s} {'detail':>7s} | "
+          f"{'fence':>6s} {'all':>6s} | {'noise':>6s}" + (" | settle 1566 1570 1575" if os.path.isdir(os.path.join(out, "rperformance_" + names[0])) else ""))
+    row = f"{'1x':5s} {'native':8s} {'-':>7s} {frame_ms(os.path.join(out, 'pnat.log')):6.2f} | {1:6.4f} {99:6.2f} {100:6.1f}% | "
+    fe, al = stability(os.path.join(out, "nat"))
+    print(row + f"{fe:6.3f} {al:6.3f} | {noise(os.path.join(out, 'mnat', 'window.png')):6.2f}")
+    for pre, tag in MODES.items():
+        if not any(os.path.exists(os.path.join(out, f"p{pre}_{n}.log")) for n in names):
+            continue
         # (the GPU's clock changes from run to run: each upscaler's time scaled by the scene's main pass - the same work
         # in every run of a mode - to the fastest run's)
         prof = {n: gpu_ms(os.path.join(out, f"p{pre}_{n}.log")) if os.path.exists(os.path.join(out, f"p{pre}_{n}.log")) else []
@@ -104,26 +135,19 @@ def main():
             row = f"{tag:5s} {n:8s} "
             try:
                 g = [u * fastest / sc for u, sc in prof[n]]
-                row += f"{statistics.median(g) if g else float('nan'):7.3f} | "
+                row += f"{statistics.median(g) if g else float('nan'):7.3f} {frame_ms(os.path.join(out, f'p{pre}_{n}.log')):6.2f} | "
                 img = luma(os.path.join(t, "window.png"))
                 ss = np.mean([ssim(crop(img, c), crop(ref, c)) for c in STILL])
                 ps = np.mean([psnr(crop(img, c), crop(ref, c)) for c in STILL])
                 de = np.mean([lap(crop(img, c)).mean() / lap(crop(ref, c)).mean() * 100 for c in STILL])
                 row += f"{ss:6.4f} {ps:6.2f} {de:6.1f}% | "
-                fs = [luma(os.path.join(t, f"fin_{i}.png")) for i in range(1596, 1602)]
-                sh = {k: np.mean([np.abs(crop(a, c) - crop(b, c)).mean() for a, b in zip(fs, fs[1:])]) for k, c in SHIMMER.items()}
-                row += f"{sh['fence']:6.3f} {np.mean(list(sh.values())):6.3f} | "
-                mv = luma(os.path.join(out, f"m{pre}_{n}", "window.png"))[:1960]
-                p = mv
-                cen = p[8:-8, 8:-8]
-                wide = np.abs(p[8:-8, 16:] - p[8:-8, :-16]) + np.abs(p[16:, 8:-8] - p[:-16, 8:-8])
-                lp = np.abs(4 * cen - p[8:-8, 7:-9] - p[8:-8, 9:-7] - p[7:-9, 8:-8] - p[9:-7, 8:-8])
-                row += f"{lp[wide <= 6].mean():6.2f} | "
+                fe, al = stability(t)
+                row += f"{fe:6.3f} {al:6.3f} | {noise(os.path.join(out, f'm{pre}_{n}', 'window.png')):6.2f}"
                 rr = os.path.join(out, f"r{pre}_{n}")
-                settled = luma(os.path.join(rr, "fin_1600.png"))[60:1960]
-                d = {i: np.abs(luma(os.path.join(rr, f"fin_{i}.png"))[60:1960] - settled).mean() for i in range(1566, 1581)}
-                first = next((i for i in range(1566, 1581) if d[i] < 1.0), None)
-                row += f"       {d[1566]:4.2f} {d[1570]:4.2f} {d[1575]:4.2f} ({first if first else '>1580'})"
+                if os.path.isdir(rr):
+                    settled = luma(os.path.join(rr, "fin_1600.png"))[60:1960]
+                    d = {i: np.abs(luma(os.path.join(rr, f"fin_{i}.png"))[60:1960] - settled).mean() for i in (1566, 1570, 1575)}
+                    row += f" |        {d[1566]:4.2f} {d[1570]:4.2f} {d[1575]:4.2f}"
             except (OSError, KeyError, ValueError) as e:
                 row += f"(missing: {e})"
             print(row, flush=True)

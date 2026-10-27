@@ -1,6 +1,6 @@
-"""A contact sheet of measure.sh's runs: python sheet.py <out> <mode: performance|ultra> <sheet.png>
+"""A contact sheet of measure.sh's runs: python sheet.py <out> <mode: quality|performance|ultra> <sheet.png>
 
-One row per upscaler (and Native AA), three crops at 2x zoom (nearest): the player at rest, the fence at rest, the
+One row per upscaler (native 4K first), three crops at 2x zoom (nearest): the player at rest, the fence at rest, the
 player moving (the camera follows the player: the same place on screen in every run)."""
 import os
 import sys
@@ -9,8 +9,8 @@ from PIL import Image, ImageDraw
 
 CROPS = [("rest: player", "t", (1780, 860, 320, 320)), ("rest: fence", "t", (1350, 250, 320, 320)),
          ("moving: player", "m", (1760, 900, 320, 320))]
-ROWS = [("gsr2", "Snapdragon GSR 2"), ("x2", "Experiment 2"), ("net", "Experiment 2 Net"), ("dexp", "DittoSR Experiment"),
-        ("dit", "DittoSR"), ("nat", "Native AA (DittoSR)")]
+ROWS = [("nat", "Native 4K (SMAA)"), ("fsr3", "FSR 3.1"), ("ditto", "DittoSR"), ("fsr4", "DittoSR (FSR4)"),
+        ("net", "DittoSR Net")]
 
 
 def main():
@@ -23,9 +23,7 @@ def main():
     for i, (n, name) in enumerate(ROWS):
         d.text((8, 30 + i * 320 * z + 8), name, fill=(230, 230, 230))
         for j, (_, kind, (x, y, w, h)) in enumerate(CROPS):
-            run = "nat" if n == "nat" else f"{kind}{pre}_{n}"
-            if n == "nat" and kind == "m":
-                continue
+            run = ("mnat" if kind == "m" else "nat") if n == "nat" else f"{kind}{pre}_{n}"
             p = os.path.join(out, run, "window.png")
             if not os.path.exists(p):
                 continue
