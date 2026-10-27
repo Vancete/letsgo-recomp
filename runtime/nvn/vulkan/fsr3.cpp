@@ -290,9 +290,11 @@ extern "C" bool dittosr_available(void) {
     return false;
 #endif
 }
+// (0.75 of the window's sides unless LARECOMP_DITTO_EXP_SCALE says: at 3x, 4K, 1.55 ms and 90 % of native 4K's detail -
+// 0.67 took 1.32 ms for 87 %, 0.5 0.91 ms for 76 %)
 extern "C" float dittosr_exp_scale(void) {
 #ifdef DITTOSR
-    return dittosr::exp_scale();
+    return getenv("LARECOMP_DITTO_EXP_SCALE") ? dittosr::exp_scale() : 0.75f;
 #else
     return 1;
 #endif
