@@ -1146,7 +1146,7 @@ static const char *builtin_src(const char *name, int *stage) {
         *stage = STAGE_FRAGMENT;
         static const char *common =
             "#version 450\n"
-            "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; } pc;\n"
+            "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; } pc;\n"
             "layout(location = 0) out vec4 o;\n";
         static const char *convert =
             "layout(set = 0, binding = 0) uniform sampler2D InputDepth;\n"
@@ -1175,8 +1175,22 @@ static const char *builtin_src(const char *name, int *stage) {
             "    depthclip = clamp(1.0 - Wdepth * 0.25, 0.0, 1.0);\n"
             "  }\n"
             "  ivec2 ms = textureSize(InputVelocity, 0);\n"
-            "  vec2 v = texelFetch(InputVelocity, clamp(ivec2(texCoord * vec2(ms)), ivec2(0), ms - 1), 0).xy;\n"
-            "  o = vec4(2.0 * v, depthclip, 0.0);\n"
+            "  ivec2 mp = clamp(ivec2(texCoord * vec2(ms)), ivec2(0), ms - 1);\n"
+            // (Experiment 2, e.x = 1: the motion of the nearest of the 3x3 - a moving silhouette's own over the
+            // background around it, no trail behind its edges)
+            "  if (pc.e.x > 0.5) {\n"
+            "    ivec2 dp = ivec2(gl_FragCoord.xy), ds = textureSize(InputDepth, 0) - 1, best = ivec2(0);\n"
+            "    float dmin = 2.0;\n"
+            "    for (int i = 0; i < 9; i++) {\n"
+            "      ivec2 q = ivec2(i % 3 - 1, i / 3 - 1);\n"
+            "      float dd = texelFetch(InputDepth, clamp(dp + q, ivec2(0), ds), 0).r;\n"
+            "      if (dd < dmin) { dmin = dd; best = q; }\n"
+            "    }\n"
+            "    mp = clamp(mp + best, ivec2(0), ms - 1);\n"
+            "  }\n"
+            "  vec2 v = texelFetch(InputVelocity, mp, 0).xy;\n"
+            "  float dc = texelFetch(InputDepth, clamp(ivec2(gl_FragCoord.xy), ivec2(0), textureSize(InputDepth, 0) - 1), 0).r;\n"
+            "  o = vec4(2.0 * v, depthclip, log2(max(1.0 - dc, 1e-7)));\n"
             "}\n";
         // (the upscale in half precision but its coordinates, as Qualcomm's: in full precision it took 2.5 ms of an
         // Adreno 830's frame at 2133 x 1200)
@@ -1277,12 +1291,14 @@ static const char *builtin_src(const char *name, int *stage) {
     if (!strcmp(name, "x2_upscale.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"
-               "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; } pc;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; vec4 f; } pc;\n"
                "layout(location = 0) out vec4 o;\n"
                "layout(set = 0, binding = 0) uniform sampler2D PrevOutput;\n"
                "layout(set = 0, binding = 1) uniform sampler2D MotionDepthClip;\n"
                "layout(set = 0, binding = 2) uniform sampler2D InputColor;\n"
                "layout(set = 0, binding = 3) uniform sampler2D CorrA;\n"
+               "layout(set = 0, binding = 4) uniform sampler2D PrevMda;\n"
+               "layout(set = 0, binding = 5) uniform sampler2D Change;\n"
                "vec3 ycc(vec3 c) { return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * (c.r - c.b), 0.5 * c.g - 0.25 * (c.r + c.b)); }\n"
                "vec3 rgb(vec3 y) { return vec3(y.x + y.y - y.z, y.x + y.z, y.x - y.y - y.z); }\n"
                "vec3 hist(vec2 uv) {\n"  // (Catmull-Rom in 5 bilinear taps)
@@ -1324,20 +1340,21 @@ static const char *builtin_src(const char *name, int *stage) {
                "  for (int i = 0; i < 9; i++) if (i != 4) { omn = min(omn, l[i]); omx = max(omx, l[i]); }\n"
                "  float ext = max(omn - l[4], l[4] - omx) / (lmx - lmn + 1e-3);\n"
                "  float lockf = pc.e.z * clamp(ext * 4.0 + 0.5 * step(0.0, ext), 0.0, 1.0);\n"
-               "  vec3 sg = vec3(0.0), ss = vec3(0.0), m1 = vec3(0.0), m2 = vec3(0.0);\n"
+               "  vec3 sg = vec3(0.0), ss = vec3(0.0), m1 = vec3(0.0), m2 = vec3(0.0), ymn = vec3(1e9), ymx = vec3(-1e9);\n"
                "  float wg = 0.0, wsum = 0.0;\n"
                "  for (int i = 0; i < 9; i++) {\n"
                "    vec2 d = vec2(b0 + ivec2(i % 3 - 1, i / 3 - 1)) + 0.5 - jit - q;\n"
                "    float dn = dot(d, nrm), dt = dot(d, vec2(-nrm.y, nrm.x));\n"
                "    float w = exp(-2.26 * (dn * dn + dt * dt * along) * ks * ks), w2 = exp(-1.4 * dot(d, d));\n"
                "    sg += cc[i] * w; wg += w; ss += cc[i] * w2; wsum += w2;\n"
-               "    vec3 yc = ycc(cc[i]); m1 += yc; m2 += yc * yc;\n"
+               "    vec3 yc = ycc(cc[i]); m1 += yc; m2 += yc * yc; ymn = min(ymn, yc); ymx = max(ymx, yc);\n"
                "  }\n"
                "  m1 /= 9.0; vec3 sig = sqrt(max(m2 / 9.0 - m1 * m1, 0.0));\n"
                "  vec3 cg = sg / max(wg, 1e-6), cs2 = ss / max(wsum, 1e-6);\n"
                "  float conf = clamp(wg, 0.0, 1.0);\n"
                "  vec3 cur = mix(cs2, cg, smoothstep(0.05, pc.d.y > 0.0 ? pc.d.y : 0.6, conf));\n"
-               "  vec3 mda = textureLod(MotionDepthClip, uv, 0.0).xyz;\n"
+               "  vec4 mda4 = textureLod(MotionDepthClip, uv, 0.0);\n"
+               "  vec3 mda = mda4.xyz;\n"
                "  vec2 puv = uv - 0.5 * mda.xy;\n"
                "  float mlen = length(0.5 * mda.xy * os);\n"
                // (the depth clip only as far as the pixel moves: at rest a silhouette stands out every frame, alternating)
@@ -1346,18 +1363,34 @@ static const char *builtin_src(const char *name, int *stage) {
                "  bool off = any(lessThan(puv, vec2(0.0))) || any(greaterThan(puv, vec2(1.0)));\n"
                "  if (pc.d.z > 0.5 || off) { o = vec4(cs2, 1.0); return; }\n"
                "  vec3 hy = ycc(hist(puv));\n"
+               // (the previous frame's motion and depth where this pixel was: f.y, the depth changed - a surface replaced, an
+               // animated limb, a disocclusion; f.z, the motion changed - another object's. Each: less history, a narrower box)
+               "  vec4 pm = (pc.f.y > 0.0 || pc.f.z > 0.0) ? textureLod(PrevMda, puv, 0.0) : vec4(0.0);\n"
+               "  float rj = pc.f.y * smoothstep(0.1, 0.3, abs(mda4.w - pm.w));\n"
+               "  rj = max(rj, pc.f.z * smoothstep(0.5, 2.0, length(0.5 * (mda4.xy - pm.xy) * os)));\n"
+               // (f.x: the share of the image that changed against its history - x2_change.frag's one pixel)
+               "  float gch = pc.f.x > 0.0 ? pc.f.x * smoothstep(0.2, 0.5, texelFetch(Change, ivec2(0), 0).r) : 0.0;\n"
                "  float rest = pc.d.w > 0.0 ? pc.d.w : 1.5;\n"
                "  float gam = mix(rest, 0.9, clamp(mlen * 0.25, 0.0, 1.0)) * (1.0 - 0.5 * mda.z);\n"
                "  gam = mix(gam, 1.5 * rest, lockf) * exp(cn.z);\n"
-               "  vec3 dir = hy - m1, ext3 = gam * sig + vec3(1.0 / 255.0);\n"
+               "  gam *= 1.0 - 0.6 * rj;\n"
+               // (f.w, moving: the box mean +- gamma sigma within the samples' own range - min / max, as far as the pixel moves)
+               "  vec3 blo = m1 - gam * sig, bhi = m1 + gam * sig;\n"
+               "  float mm = pc.f.w * clamp(mlen * 0.5, 0.0, 1.0);\n"
+               "  blo = mix(blo, max(blo, ymn), mm); bhi = mix(bhi, min(bhi, ymx), mm);\n"
+               "  vec3 bc = 0.5 * (blo + bhi), ext3 = 0.5 * (bhi - blo) + vec3(1.0 / 255.0);\n"
+               "  vec3 dir = hy - bc;\n"
                "  vec3 ad = abs(dir) / ext3;\n"
                "  float t = max(ad.x, max(ad.y, ad.z));\n"
-               "  if (t > 1.0) hy = m1 + dir / t;\n"
+               "  if (t > 1.0) hy = bc + dir / t;\n"
                "  float base = mix(pc.d.x > 0.0 ? pc.d.x : 0.08, 0.3, clamp(mlen * 0.125, 0.0, 1.0));\n"
                "  float a = base * mix(pc.b.x > 0.0 ? pc.b.x : 0.6, pc.b.y > 0.0 ? pc.b.y : 1.4, smoothstep(0.05, 0.8, conf));\n"
                "  a = mix(a, 0.6, mda.z);\n"
                // the reaction (e.x): the history outside the samples' range by t - something changed - the new frame by it
-               "  a = mix(a, 0.5, clamp((t - 1.0) * pc.e.x, 0.0, 1.0) * (1.0 - lockf));\n"
+               // (with much of the image changed the reaction goes further: the new frame up to 0.95 - gch)
+               "  a = mix(a, mix(0.5, 0.95, gch), clamp((t - 1.0) * pc.e.x, 0.0, 1.0) * (1.0 - lockf));\n"
+               "  a = mix(a, max(a, 0.5), gch);\n"
+               "  a = mix(a, max(a, 0.6), rj);\n"
                "  if (pc.e.w > 0.5) { float ac = clamp(a, 1e-3, 1.0 - 1e-3); a = 1.0 / (1.0 + exp(-(log(ac / (1.0 - ac)) + cn.w))); }\n"
                "  o = vec4(mix(rgb(hy), cur, clamp(a, 0.0, 1.0)), 1.0);\n"
                "}\n";
@@ -1496,6 +1529,41 @@ static const char *builtin_src(const char *name, int *stage) {
                "  r = clamp(r, max(mn - pc.a.z * (mx - mn), 0.0), mx);\n"
                "  float k = pc.a.w > 0.5 ? texture(m, uv).r : 0.0;\n"
                "  o = vec4(k > 0.0 ? mix(r, cr(uv), k) : r, 1.0);\n"
+               "}\n";
+    }
+    // x2_change.frag (DittoSR Experiment 2's global reaction, exec.c gsr2_run, exp2_greact): a.x = 0, a 4 x 4 image (R16F),
+    // each pixel 16 points of a 16 x 16 grid over the render image - the share of them whose colour this frame differs
+    // from the history (the previous upscale) where the point was by over 0.1 in luma; a.x = 1, that image averaged into
+    // one pixel (t0), the one texel x2_upscale.frag reads (the 4 x 4 read by every pixel: +0.025 ms at 4K; the 256 points
+    // in one pixel: 0.15 ms, one after another). A
+    // scene change, a menu closing, a fade: most of the image at once - its reaction then goes further. t0 = the
+    // history, t1 = gsr2_convert's (motion), t2 = the colour.
+    if (!strcmp(name, "x2_change.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D Hist;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D Mda;\n"
+               "layout(set = 0, binding = 2) uniform sampler2D Color;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  if (pc.a.x > 0.5) {\n"
+               "    float s = 0.0;\n"
+               "    for (int i = 0; i < 16; i++) s += texelFetch(Hist, ivec2(i % 4, i / 4), 0).r;\n"
+               "    o = vec4(s / 16.0);\n"
+               "    return;\n"
+               "  }\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy), rs = textureSize(Color, 0);\n"
+               "  float n = 0.0, c = 0.0;\n"
+               "  for (int i = 0; i < 16; i++) {\n"
+               "    vec2 g = (vec2(p * 4 + ivec2(i % 4, i / 4)) + 0.5) / 16.0;\n"
+               "    ivec2 q = ivec2(g * vec2(rs));\n"
+               "    vec2 puv = (vec2(q) + 0.5) / vec2(rs) - 0.5 * texelFetch(Mda, q, 0).xy;\n"
+               "    if (any(lessThan(puv, vec2(0.0))) || any(greaterThan(puv, vec2(1.0)))) continue;\n"
+               "    float d = abs(dot(texelFetch(Color, q, 0).rgb - textureLod(Hist, puv, 0.0).rgb, vec3(0.25, 0.5, 0.25)));\n"
+               "    c += step(0.1, d); n += 1.0;\n"
+               "  }\n"
+               "  o = vec4(n > 0.0 ? c / n : 0.0);\n"
                "}\n";
     }
     // ---- LOCAL experiment, Experiment 2 Net (exec.c srnet_run, UPSCALE_X2_NET): the tiny network of tools/srnet (3895

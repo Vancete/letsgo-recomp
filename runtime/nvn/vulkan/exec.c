@@ -4901,11 +4901,12 @@ static VkPipeline post_pipeline(const char *fs) { return post_pipeline_ex(fs, VK
 // reduced size (vk_tex_lo_begin) have a set of their own (64 on). 40-46: the optical flow's (flow_*), 47: GSR 2's output
 // sharpened, its interface after it, 50: its motion and depth clip (render size, RGBA16F), 51, 52: its history (output
 // size, ping-pong: gsr2_run), 53, 61, 62: Experiment 2 Net's corrections and state (srnet_run), 54-60: the training
-// captures (srcap_run) - local:
+// captures (srcap_run), 63: the convert pass's output's other half (ping-pong with 50), 128, 129: Experiment 2's change
+// (x2_change.frag) - local:
 // sized for them, they were made again at every switch between a real frame and an in-between image, and the real
 // frames' histories (SSAO, GI, TAA) went with them.
 static TexBackend *post_image_fmt(int i, uint32_t w, uint32_t h, VkFormat fmt) {
-    static TexBackend img[128];
+    static TexBackend img[256];  // (128 on: more slots, each with its reduced twin 64 further)
     TexBackend *d = &img[i + (vk_tex_lo_active() ? 64 : 0)];
     if (d->image && (d->width != w || d->height != h || d->format != fmt)) {
         vk_views_forget(d);
@@ -5658,23 +5659,41 @@ static TexBackend *gsr2_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mv, 
     still = ao.prev_ok && dv_ < 1e-6 ? still + 1 : 0;
     bool reset = !ao.prev_ok || hw != ow || hh != oh || last + 1 != renderer_present_count();
     hw = ow, hh = oh, last = renderer_present_count();
-    TexBackend *mda = post_image_fmt(50, rw, rh, VK_FORMAT_R16G16B16A16_SFLOAT);
+    // (the convert pass's output, ping-pong 50 / 63: Experiment 2's rejections read the previous frame's)
+    static int mcur;
+    TexBackend *mdap = post_image_fmt(mcur ? 63 : 50, rw, rh, VK_FORMAT_R16G16B16A16_SFLOAT);
+    mcur ^= 1;
+    TexBackend *mda = post_image_fmt(mcur ? 63 : 50, rw, rh, VK_FORMAT_R16G16B16A16_SFLOAT);
     VkFormat hf = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
     TexBackend *prev = post_image_fmt(51 + cur, ow, oh, hf);
     cur ^= 1;
     TexBackend *out = post_image_fmt(51 + cur, ow, oh, hf);
     float area = (float)ow * (float)oh / ((float)rw * (float)rh);
-    float pc[20] = {(float)rw, (float)rh, (float)ow, (float)oh, 1.0f / (float)rw, 1.0f / (float)rh, 1.0f / (float)ow, 1.0f / (float)oh,
+    float pc[24] = {(float)rw, (float)rh, (float)ow, (float)oh, 1.0f / (float)rw, 1.0f / (float)rh, 1.0f / (float)ow, 1.0f / (float)oh,
                     taa_jit[2], taa_jit[3], (float)ow / (float)rw, fminf(20.0f, area * area * area),
                     // tan(horizontal fov / 2), minLerpContribution (Qualcomm's sample: 0.3 once the camera stood still
                     // more than 5 frames), the reset (its output: this frame's image alone)
-                    (float)rw / ((float)rh * ao.proj[1]), still > 5 ? 0.3f : 0.0f, reset ? 1.0f : 0.0f, 0, 0, 0, 0, 0};
+                    (float)rw / ((float)rh * ao.proj[1]), still > 5 ? 0.3f : 0.0f, reset ? 1.0f : 0.0f, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    // (LOCAL experiment, DittoSR Experiment 2's ghosting and settling, research - 0 off: LARECOMP_EXP2_GREACT the
+    // reaction to a large change of the image, _DREJ the rejection by a changed depth, _DILATE the nearest motion of
+    // the 3x3 (the convert pass's e.x), _VREJ the rejection by a changed motion, _MINMAX the box within the samples' range)
+    // (the graphics page's checkboxes, g_settings.exp2_*; an environment variable set wins - the measurements)
+    float kg[5] = {g_settings.exp2_greact, g_settings.exp2_drej, g_settings.exp2_vrej, g_settings.exp2_minmax, g_settings.exp2_dilate};
+    {
+        const char *nm[5] = {"LARECOMP_EXP2_GREACT", "LARECOMP_EXP2_DREJ", "LARECOMP_EXP2_VREJ", "LARECOMP_EXP2_MINMAX", "LARECOMP_EXP2_DILATE"};
+        static float env[5] = {-2};
+        if (env[0] == -2) for (int i = 0; i < 5; i++) env[i] = getenv(nm[i]) ? (float)atof(getenv(nm[i])) : -1;
+        for (int i = 0; i < 5; i++) if (env[i] >= 0) kg[i] = env[i];
+    }
+    bool x2g = UPSCALE_IS_X2(g_settings.upscaler);
+    pc[16] = x2g ? kg[4] : 0;
     // (LOCAL experiment, DittoSR Experiment 2: its own upscale - d.w its history clip width at rest, LARECOMP_EXP2_GAMMA)
     static const VkComponentMapping id = {0};
     VkImageView dv = vk_image_view(ao.depth, VK_IMAGE_VIEW_TYPE_2D, ao.depth->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
     VkImageView ci[2] = {dv, post_view(mv)};
     post_pass_view(cb, post_pipeline_ex("gsr2_convert.frag", VK_FORMAT_R16G16B16A16_SFLOAT, 0), ci, 2, post_view(mda), rw, rh, pc,
-                   64, false, false);
+                   80, false, false);
+    pc[16] = 0;
     // (LOCAL experiment, DittoSR Experiment 2: its knobs into the upscale's constants only, after the convert pass - it
     // reads d.x as the field of view: 0 there marked every pixel's depth as standing out, the history all but unused)
     bool x2 = UPSCALE_IS_X2(g_settings.upscaler);
@@ -5707,6 +5726,7 @@ static TexBackend *gsr2_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mv, 
             ke[2] = getenv("LARECOMP_EXP2_LOCK") ? (float)atof(getenv("LARECOMP_EXP2_LOCK")) : 0;
         }
         pc[16] = ke[0], pc[17] = ke[1], pc[18] = ke[2];
+        pc[20] = kg[0], pc[21] = kg[1], pc[22] = kg[2], pc[23] = kg[3];
     }
     if (x2 && x2m == 1) {  // (research, mode 1: LARECOMP_EXP2_BOX, _AMAX - 0 their defaults)
         static float kb[2] = {-1, 0};
@@ -5720,10 +5740,25 @@ static TexBackend *gsr2_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mv, 
     TexBackend *corr = NULL;
     srnet_corr_b = NULL;
     if (x2 && x2m == 0 && g_settings.upscaler == UPSCALE_X2_NET) corr = srnet_run(cb, in, mda, prev, ow, oh, reset), pc[19] = 1;
-    VkImageView ui[4] = {post_view(prev), post_view(mda), raw_view(in), corr ? post_view(corr) : raw_view(in)};
+    // (Experiment 2's global reaction: how much of the image changed against its history - x2_change.frag, 4 x 4 R16F,
+    // then averaged into 1 x 1)
+    TexBackend *chg = NULL;
+    if (x2 && x2m == 0 && kg[0] > 0 && !reset) {
+        TexBackend *c4 = post_image_fmt(129, 4, 4, VK_FORMAT_R16_SFLOAT);
+        chg = post_image_fmt(128, 1, 1, VK_FORMAT_R16_SFLOAT);
+        VkPipeline pch = post_pipeline_ex("x2_change.frag", VK_FORMAT_R16_SFLOAT, 0);
+        float pz[8] = {0}, p1[8] = {1};
+        VkImageView gi[3] = {post_view(prev), post_view(mda), raw_view(in)};
+        post_pass_view(cb, pch, gi, 3, post_view(c4), 4, 4, pz, 32, false, false);
+        VkImageView ri[3] = {post_view(c4), post_view(mda), raw_view(in)};
+        post_pass_view(cb, pch, ri, 3, post_view(chg), 1, 1, p1, 32, false, false);
+    }
+    VkImageView ui[6] = {post_view(prev), post_view(mda), raw_view(in), corr ? post_view(corr) : raw_view(in), post_view(mdap),
+                         chg ? post_view(chg) : raw_view(in)};
+    if (!chg) pc[20] = 0;
     gp_mark(cb, "ours: GSR 2 upscale");
-    post_pass_view(cb, post_pipeline_ex(!x2 ? "gsr2_upscale.frag" : x2m == 1 ? "x2b_upscale.frag" : "x2_upscale.frag", hf, 0), ui, 4, post_view(out), ow, oh, pc,
-                   x2 && x2m == 0 ? 80 : 64, false, false);
+    post_pass_view(cb, post_pipeline_ex(!x2 ? "gsr2_upscale.frag" : x2m == 1 ? "x2b_upscale.frag" : "x2_upscale.frag", hf, 0), ui, 6, post_view(out), ow, oh, pc,
+                   x2 && x2m == 0 ? 96 : 64, false, false);
     return out;
 }
 // ---- LOCAL research: the tiny network's training pairs (tools/srnet). LARECOMP_SRCAP=<folder>, with the game rendered

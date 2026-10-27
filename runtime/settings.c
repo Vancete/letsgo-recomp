@@ -147,6 +147,11 @@ static void parse_line(const char *line) {
     }
     else if (!strcmp(key, "taa_sharpness")) g_settings.taa_sharpness = (float)atof(val);
     else if (!strcmp(key, "fsr3_sharpness")) g_settings.fsr3_sharpness = (float)atof(val);
+    else if (!strcmp(key, "exp2_greact")) g_settings.exp2_greact = atoi(val) != 0;
+    else if (!strcmp(key, "exp2_drej")) g_settings.exp2_drej = atoi(val) != 0;
+    else if (!strcmp(key, "exp2_dilate")) g_settings.exp2_dilate = atoi(val) != 0;
+    else if (!strcmp(key, "exp2_vrej")) g_settings.exp2_vrej = atoi(val) != 0;
+    else if (!strcmp(key, "exp2_minmax")) g_settings.exp2_minmax = atoi(val) != 0;
     else if (!strcmp(key, "fsr3_preset"))
         g_settings.fsr3_preset = !strcmp(val, "native") ? FSR3_NATIVE_AA : !strcmp(val, "balanced") ? FSR3_BALANCED :
                                  !strcmp(val, "performance") ? FSR3_PERFORMANCE : !strcmp(val, "ultra") ? FSR3_ULTRA_PERFORMANCE : FSR3_QUALITY;
@@ -298,6 +303,8 @@ void settings_save(void) {
     fprintf(f, "upscaler = %s\n", ups[up >= 0 && up <= UPSCALE_X2_NET ? up : 0]);
     fprintf(f, "taa_sharpness = %.2f\n", g_settings.taa_sharpness);
     fprintf(f, "fsr3_sharpness = %.2f\n", g_settings.fsr3_sharpness);
+    fprintf(f, "exp2_greact = %d\nexp2_drej = %d\nexp2_dilate = %d\nexp2_vrej = %d\nexp2_minmax = %d\n", g_settings.exp2_greact,
+            g_settings.exp2_drej, g_settings.exp2_dilate, g_settings.exp2_vrej, g_settings.exp2_minmax);
     static const char *const presets[] = {"native", "quality", "balanced", "performance", "ultra"};
     fprintf(f, "fsr3_preset = %s\n", presets[g_settings.fsr3_preset >= 0 && g_settings.fsr3_preset <= 4 ? g_settings.fsr3_preset : 1]);
     if (g_settings.frame_gen == FG_AUTO) fprintf(f, "frame_gen = auto\n");

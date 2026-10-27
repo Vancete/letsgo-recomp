@@ -117,9 +117,14 @@ class TinyNet(nn.Module):
 
 
 class Upscaler(nn.Module):
-    def __init__(self, use_net=True):
+    """opts (Experiment 2's ghosting and settling knobs, LARECOMP_EXP2_*; 0 off): greact (the reaction to a large
+    change of the image), drej (the rejection by a changed depth), dilate (the nearest motion of the 3x3), vrej (the
+    rejection by a changed motion), minmax (the box within the samples' range in motion)."""
+    def __init__(self, use_net=True, opts=None):
         super().__init__()
         self.net = TinyNet() if use_net else None
+        self.opts = {"greact": 0.0, "drej": 0.0, "dilate": 0.0, "vrej": 0.0, "minmax": 0.0, **(opts or {})}
+        self.prev_mda = None
 
     def features(self, color, clip, mv, hist, state, os_):
         """The network's inputs at the render size: the colour (YCoCg), the depth clip, how far the pixel moves, the
@@ -144,8 +149,19 @@ class Upscaler(nn.Module):
         W, H = out_size
         dev, dt = color.device, color.dtype
         ratio = W / w
+        o_ = self.opts
         clip = depth_clip(depth, tan_fov, diag)
-        mda = torch.cat([2.0 * mv, clip], 1)
+        if o_["dilate"] > 0.5:  # (gsr2_convert.frag e.x: the motion of the nearest of the 3x3)
+            dp = F.pad(depth, (1, 1, 1, 1), mode="replicate")
+            mp = F.pad(mv, (1, 1, 1, 1), mode="replicate")
+            ds = torch.stack([dp[:, 0, y:y + h, x:x + w] for y in range(3) for x in range(3)], 1)
+            ms = torch.stack([mp[:, :, y:y + h, x:x + w] for y in range(3) for x in range(3)], 1)
+            # (the shader takes the first minimum in its order: argmin does too)
+            k = ds.argmin(1, keepdim=True)
+            mv = torch.gather(ms, 1, k.unsqueeze(2).expand(-1, -1, 2, -1, -1)).squeeze(1)
+        mda = torch.cat([2.0 * mv, clip, torch.log2((1.0 - depth).clamp_min(1e-7))], 1)
+        pmda = self.prev_mda if hist is not None else None
+        self.prev_mda = mda.detach()
         corr = None
         new_state = None
         if self.net is not None:
@@ -192,6 +208,8 @@ class Upscaler(nn.Module):
         ss = torch.zeros_like(sg)
         m1 = torch.zeros_like(sg)
         m2 = torch.zeros_like(sg)
+        ymn = torch.full_like(sg, 1e9)
+        ymx = torch.full_like(sg, -1e9)
         wg = torch.zeros(B, 1, H, W, device=dev, dtype=dt)
         wsum = torch.zeros_like(wg)
         for i in range(9):
@@ -207,6 +225,8 @@ class Upscaler(nn.Module):
             yc = ycc(cc[i])
             m1 = m1 + yc
             m2 = m2 + yc * yc
+            ymn = torch.minimum(ymn, yc)
+            ymx = torch.maximum(ymx, yc)
         m1 = m1 / 9.0
         sig = torch.sqrt((m2 / 9.0 - m1 * m1).clamp_min(0) + 1e-12)
         cg = sg / wg.clamp_min(1e-6)
@@ -218,6 +238,7 @@ class Upscaler(nn.Module):
         else:
             m = sample(mda, uv)
             mvo = 0.5 * m[:, 0:2]
+            osz = torch.tensor([W, H], device=dev, dtype=dt).view(1, 2, 1, 1)
             puv = uv - mvo.permute(0, 2, 3, 1)
             mlen = (mvo * torch.tensor([W, H], device=dev, dtype=dt).view(1, 2, 1, 1)).norm(dim=1, keepdim=True)
             mz = m[:, 2:3] * (mlen * 0.5).clamp(0, 1)
@@ -230,17 +251,34 @@ class Upscaler(nn.Module):
                 gp = puv
             off = ((gp < 0) | (gp > 1)).any(-1).unsqueeze(1)
             hy = ycc(catmull_rom(hist, puv))
+            # (x2_upscale.frag f.y / f.z: the previous frame's depth / motion where the pixel was)
+            rj = torch.zeros_like(mz)
+            if pmda is not None and (o_["drej"] > 0 or o_["vrej"] > 0):
+                pm = sample(pmda, puv)
+                rj = o_["drej"] * smoothstep(0.1, 0.3, (m[:, 3:4] - pm[:, 3:4]).abs())
+                rj = torch.maximum(rj, o_["vrej"] * smoothstep(0.5, 2.0, (0.5 * (m[:, 0:2] - pm[:, 0:2]) * osz).norm(dim=1, keepdim=True)))
+            gch = 0.0
+            if o_["greact"] > 0:
+                gch = o_["greact"] * smoothstep(0.2, 0.5, global_change(hist, mda, color))
             gam = (REST + (0.9 - REST) * (mlen * 0.25).clamp(0, 1)) * (1.0 - 0.5 * mz)
             if corr is not None:
                 gam = gam * torch.exp(gam_c)
-            dirv = hy - m1
-            ext3 = gam * sig + 1.0 / 255.0
+            gam = gam * (1.0 - 0.6 * rj)
+            blo, bhi = m1 - gam * sig, m1 + gam * sig
+            mm = o_["minmax"] * (mlen * 0.5).clamp(0, 1)
+            blo = blo + (torch.maximum(blo, ymn) - blo) * mm
+            bhi = bhi + (torch.minimum(bhi, ymx) - bhi) * mm
+            bc, ext3 = 0.5 * (blo + bhi), 0.5 * (bhi - blo) + 1.0 / 255.0
+            dirv = hy - bc
             t = (dirv.abs() / ext3).max(1, keepdim=True)[0]
-            hy = torch.where(t > 1.0, m1 + dirv / t.clamp_min(1.0), hy)
+            hy = torch.where(t > 1.0, bc + dirv / t.clamp_min(1.0), hy)
             base = ALPHA + (0.3 - ALPHA) * (mlen * 0.125).clamp(0, 1)
             a = base * (AFAR + (ANEAR - AFAR) * smoothstep(0.05, 0.8, conf))
             a = a + (0.6 - a) * mz
-            a = a + (0.5 - a) * ((t - 1.0) * REACT).clamp(0, 1)
+            tgt = 0.5 + (0.95 - 0.5) * gch
+            a = a + (tgt - a) * ((t - 1.0) * REACT).clamp(0, 1)
+            a = a + (torch.maximum(a, torch.full_like(a, 0.5)) - a) * gch
+            a = a + (torch.maximum(a, torch.full_like(a, 0.6)) - a) * rj
             a = a.clamp(0, 1)
             if corr is not None:
                 ac = a.clamp(1e-3, 1 - 1e-3)
@@ -252,6 +290,23 @@ class Upscaler(nn.Module):
         s = torch.exp(line_c) if corr is not None else 1.0
         final = line_pass(out, s)
         return out, final, new_state
+
+
+def global_change(hist, mda, color):
+    """x2_change.frag: the share of a 16 x 16 grid of render pixels whose colour differs from the history where the
+    point was by over 0.1 in luma (B x 1 x 1 x 1)."""
+    B, _, h, w = color.shape
+    g = (torch.arange(16, device=color.device, dtype=color.dtype) + 0.5) / 16
+    qx, qy = (g * w).long(), (g * h).long()
+    c = color[:, :, qy][:, :, :, qx]
+    mv = mda[:, 0:2, qy][:, :, :, qx]
+    gy, gx = torch.meshgrid((qy.to(color.dtype) + 0.5) / h, (qx.to(color.dtype) + 0.5) / w, indexing="ij")
+    puv = torch.stack([gx, gy], -1).expand(B, 16, 16, 2) - 0.5 * mv.permute(0, 2, 3, 1)
+    valid = ((puv >= 0) & (puv <= 1)).all(-1).unsqueeze(1).to(color.dtype)
+    lw = torch.tensor(LUMA, device=color.device, dtype=color.dtype).view(1, 3, 1, 1)
+    d = ((c - sample(hist, puv)) * lw).sum(1, keepdim=True).abs()
+    ch = (d > 0.1).to(color.dtype) * valid
+    return (ch.sum((2, 3), keepdim=True) / valid.sum((2, 3), keepdim=True).clamp_min(1))
 
 
 def line_pass(x, s=1.0):

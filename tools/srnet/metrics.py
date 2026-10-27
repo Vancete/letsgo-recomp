@@ -59,31 +59,32 @@ def psnr(a, b):
 
 
 def gpu_ms(log):
-    frames, cur, on = [], 0.0, False
+    """(the upscaler's time, the scene's main pass) per profiled frame, the first left out."""
+    frames, cur, on, scene = [], 0.0, False, 0.0
     for line in open(log, encoding="utf-8", errors="replace"):
         if "[gpuprof]" not in line:
             continue
         if "marks," in line:
-            if on or cur:
-                frames.append(cur)
-            cur, on = 0.0, False
+            cur, on, scene = 0.0, False, 0.0
             continue
         m = re.match(r".*\[gpuprof\]\s+([\d.]+) ms\s+[\d.]+%\s+(.*)", line)
         if not m:
             continue
         what = m.group(2).strip()
+        dm = re.match(r"pass: 1 color \d+x\d+ .* (\d+) draws", what)
+        if dm and int(dm.group(1)) > 100:
+            scene = max(scene, float(m.group(1)))
         if what.startswith("ours: post"):
             on = True
             continue
         if what.startswith("ours: upscaler done"):
-            if on:
-                frames.append(cur)
+            if on and scene > 0:
+                frames.append((cur, scene))
             cur, on = 0.0, False
             continue
         if on:
             cur += float(m.group(1))
-    frames = [f for f in frames if f > 0][1:]
-    return statistics.median(frames) if frames else float("nan")
+    return [f for f in frames if f[0] > 0][1:]
 
 
 def main():
@@ -93,11 +94,17 @@ def main():
     print(f"{'mode':5s} {'upscaler':8s} {'gpu ms':>7s} | {'SSIM':>6s} {'PSNR':>6s} {'detail':>7s} | {'fence':>6s} {'all':>6s} | "
           f"{'noise':>6s} | settle 1566 1570 1575 (first < 1)")
     for pre, tag in (("performance", "2x"), ("ultra", "3x")):
+        # (the GPU's clock changes from run to run: each upscaler's time scaled by the scene's main pass - the same work
+        # in every run of a mode - to the fastest run's)
+        prof = {n: gpu_ms(os.path.join(out, f"p{pre}_{n}.log")) if os.path.exists(os.path.join(out, f"p{pre}_{n}.log")) else []
+                for n in names}
+        fastest = min((sc for fr in prof.values() for _, sc in fr), default=float("nan"))
         for n in names:
             t = os.path.join(out, f"t{pre}_{n}")
             row = f"{tag:5s} {n:8s} "
             try:
-                row += f"{gpu_ms(os.path.join(out, f't{pre}_{n}.log')):7.3f} | "
+                g = [u * fastest / sc for u, sc in prof[n]]
+                row += f"{statistics.median(g) if g else float('nan'):7.3f} | "
                 img = luma(os.path.join(t, "window.png"))
                 ss = np.mean([ssim(crop(img, c), crop(ref, c)) for c in STILL])
                 ps = np.mean([psnr(crop(img, c), crop(ref, c)) for c in STILL])

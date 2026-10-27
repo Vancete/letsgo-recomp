@@ -609,6 +609,40 @@ void ui_page_graphics(float x, bool known) {
         ui_tip(UI_T("How much lower the scene is drawn before the upscaler brings it up: the window's size divided by the ratio. Higher ratios run faster and look softer.",
                     "Quanto menor a cena é desenhada antes de o ampliador a levar ao tamanho da tela: o tamanho da janela dividido pela razão. Razões maiores rodam mais rápido e ficam mais suaves.",
                     "Во сколько раз меньше рисуется сцена перед увеличением: размер окна, делённый на коэффициент. Больший коэффициент быстрее, но мягче."));
+        // (LOCAL experiment, DittoSR Experiment 2 / Net: its ghosting and settling options, each on its own - exec.c gsr2_run)
+        if (UPSCALE_IS_X2(g_settings.upscaler)) {
+            struct { const char *id, *label, *tip; bool *v; } o[] = {
+                {"##x2greact", UI_T("Fast settling", "Assentamento rápido", "Быстрое успокоение"),
+                 UI_T("When much of the image changes at once (a menu closing, a cut), the history gives way faster.",
+                      "Quando muito da imagem muda de uma vez (um menu fechando, um corte), o histórico cede mais rápido.",
+                      "Когда большая часть кадра меняется разом (закрытие меню, смена сцены), история уступает быстрее."),
+                 &g_settings.exp2_greact},
+                {"##x2drej", UI_T("Ghosting: depth", "Fantasmas: profundidade", "Шлейфы: глубина"),
+                 UI_T("Less history where the depth changed since the last frame: animated limbs, things uncovered.",
+                      "Menos histórico onde a profundidade mudou desde o último quadro: membros animados, o que foi descoberto.",
+                      "Меньше истории там, где глубина изменилась с прошлого кадра: анимированные части, открывшиеся места."),
+                 &g_settings.exp2_drej},
+                {"##x2dilate", UI_T("Ghosting: edge motion", "Fantasmas: movimento das bordas", "Шлейфы: движение краёв"),
+                 UI_T("Each pixel takes the motion of the nearest thing around it: no trail behind moving edges.",
+                      "Cada pixel toma o movimento do que está mais perto ao redor: sem rastro atrás de bordas em movimento.",
+                      "Каждый пиксель берёт движение ближайшего объекта рядом: без следа за движущимися краями."),
+                 &g_settings.exp2_dilate},
+                {"##x2vrej", UI_T("Ghosting: motion change", "Fantasmas: mudança de movimento", "Шлейфы: смена движения"),
+                 UI_T("Less history where the motion differs from the last frame's: another object is there now.",
+                      "Menos histórico onde o movimento difere do último quadro: agora há outro objeto ali.",
+                      "Меньше истории там, где движение отличается от прошлого кадра: там теперь другой объект."),
+                 &g_settings.exp2_vrej},
+                {"##x2minmax", UI_T("Ghosting: tight clamp", "Fantasmas: limite estreito", "Шлейфы: узкое ограничение"),
+                 UI_T("While moving, the history is held within the new samples' own range.",
+                      "Em movimento, o histórico fica dentro da faixa das novas amostras.",
+                      "В движении история ограничена диапазоном новых сэмплов."),
+                 &g_settings.exp2_minmax}};
+            for (int i = 0; i < 5; i++) {
+                ui_row(o[i].label, x);
+                ImGui::Checkbox(o[i].id, o[i].v);
+                ui_tip(o[i].tip);
+            }
+        }
         float pct = g_settings.fsr3_sharpness * 100;
         ui_row(l[7], x);
         if (ui_slider("##fsr3s", &pct, 0, 100, "%.0f%%", 5)) g_settings.fsr3_sharpness = pct / 100;
