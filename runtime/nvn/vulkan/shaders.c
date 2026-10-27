@@ -6,7 +6,7 @@
 #include <sys/stat.h>
 
 #include "shaders.h"
-#include "srnet_weights.h"  // (LOCAL experiment, Experiment 2 Net: srnet.comp)
+#include "srnet_weights.h"  // (LOCAL experiment, DittoSR Net: srnet.comp)
 
 void vk_shaders_init(void) {  // (compilers are per thread: check shaderc works at all)
     shaderc_compiler_t c = shaderc_compiler_initialize();
@@ -306,86 +306,6 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(grade(c * 0.25), 1.0);\n"
                "}\n";
     }
-    // The present with Snapdragon Game Super Resolution 1 (the Graphics tab's upscaler; exec.c vk_present_draw: only to
-    // a larger size): Qualcomm's sgsr1_shader_mobile.frag (third_party/snapdragon-gsr, BSD 3-Clause, kept as it is but
-    // for the interface: our present's uv and push constants instead of its uniforms, its ViewportInfo from the
-    // texture's size, RGBA mode - green as the luma), then the colour grade. One pass at the window's size: a 12-tap
-    // Lanczos-like filter with adaptive sharpening where it finds an edge, one bilinear tap elsewhere.
-    if (!strcmp(name, "present_gsr.frag")) {
-        *stage = STAGE_FRAGMENT;
-        return "#version 450\n"
-               "//  Copyright (c) 2025, Qualcomm Innovation Center, Inc. All rights reserved.\n"
-               "//  SPDX-License-Identifier: BSD-3-Clause (third_party/snapdragon-gsr/LICENSE.txt)\n"
-               "precision mediump float;\n"
-               "precision highp int;\n"
-               "layout(set = 0, binding = 0) uniform mediump sampler2D ps0;\n"
-               "layout(push_constant) uniform P { vec4 a; vec4 crop; vec4 grade; } pc;\n"
-               "layout(location = 0) in highp vec2 uv;\n"
-               "layout(location = 0) out vec4 o;\n"
-               PRESENT_GRADE
-               "#define EdgeThreshold 8.0/255.0\n"
-               "#define EdgeSharpness 2.0\n"
-               "float fastLanczos2(float x) {\n"
-               "  float wA = x - 4.0;\n"
-               "  float wB = x * wA - wA;\n"
-               "  wA *= wA;\n"
-               "  return wB * wA;\n"
-               "}\n"
-               "vec2 weightY(float dx, float dy, float c, float std) {\n"
-               "  float x = ((dx * dx) + (dy * dy)) * 0.55 + clamp(abs(c) * std, 0.0, 1.0);\n"
-               "  float w = fastLanczos2(x);\n"
-               "  return vec2(w, w * c);\n"
-               "}\n"
-               "void main() {\n"
-               "  const int mode = 1;\n"
-               "  highp vec4 ViewportInfo = vec4(1.0 / vec2(textureSize(ps0, 0)), vec2(textureSize(ps0, 0)));\n"
-               "  vec4 color;\n"
-               "  color.xyz = textureLod(ps0, uv, 0.0).xyz;\n"
-               "  highp vec2 imgCoord = ((uv * ViewportInfo.zw) + vec2(-0.5, 0.5));\n"
-               "  highp vec2 imgCoordPixel = floor(imgCoord);\n"
-               "  highp vec2 coord = (imgCoordPixel * ViewportInfo.xy);\n"
-               "  vec2 pl = (imgCoord + (-imgCoordPixel));\n"
-               "  vec4 left = textureGather(ps0, coord, mode);\n"
-               "  float edgeVote = abs(left.z - left.y) + abs(color[mode] - left.y) + abs(color[mode] - left.z);\n"
-               "  if (edgeVote > EdgeThreshold) {\n"
-               "    coord.x += ViewportInfo.x;\n"
-               "    vec4 right = textureGather(ps0, coord + vec2(ViewportInfo.x, 0.0), mode);\n"
-               "    vec4 upDown;\n"
-               "    upDown.xy = textureGather(ps0, coord + vec2(0.0, -ViewportInfo.y), mode).wz;\n"
-               "    upDown.zw = textureGather(ps0, coord + vec2(0.0, ViewportInfo.y), mode).yx;\n"
-               "    float mean = (left.y + left.z + right.x + right.w) * 0.25;\n"
-               "    left = left - vec4(mean);\n"
-               "    right = right - vec4(mean);\n"
-               "    upDown = upDown - vec4(mean);\n"
-               "    color.w = color[mode] - mean;\n"
-               "    float sum = (((((abs(left.x) + abs(left.y)) + abs(left.z)) + abs(left.w)) + (((abs(right.x) + abs(right.y)) +\n"
-               "                abs(right.z)) + abs(right.w))) + (((abs(upDown.x) + abs(upDown.y)) + abs(upDown.z)) + abs(upDown.w)));\n"
-               "    float std = 2.181818 / sum;\n"
-               "    vec2 aWY = weightY(pl.x, pl.y + 1.0, upDown.x, std);\n"
-               "    aWY += weightY(pl.x - 1.0, pl.y + 1.0, upDown.y, std);\n"
-               "    aWY += weightY(pl.x - 1.0, pl.y - 2.0, upDown.z, std);\n"
-               "    aWY += weightY(pl.x, pl.y - 2.0, upDown.w, std);\n"
-               "    aWY += weightY(pl.x + 1.0, pl.y - 1.0, left.x, std);\n"
-               "    aWY += weightY(pl.x, pl.y - 1.0, left.y, std);\n"
-               "    aWY += weightY(pl.x, pl.y, left.z, std);\n"
-               "    aWY += weightY(pl.x + 1.0, pl.y, left.w, std);\n"
-               "    aWY += weightY(pl.x - 1.0, pl.y - 1.0, right.x, std);\n"
-               "    aWY += weightY(pl.x - 2.0, pl.y - 1.0, right.y, std);\n"
-               "    aWY += weightY(pl.x - 2.0, pl.y, right.z, std);\n"
-               "    aWY += weightY(pl.x - 1.0, pl.y, right.w, std);\n"
-               "    float finalY = aWY.y / aWY.x;\n"
-               "    float maxY = max(max(left.y, left.z), max(right.x, right.w));\n"
-               "    float minY = min(min(left.y, left.z), min(right.x, right.w));\n"
-               "    finalY = clamp(EdgeSharpness * finalY, minY, maxY);\n"
-               "    float deltaY = finalY - color.w;\n"
-               "    deltaY = clamp(deltaY, -23.0 / 255.0, 23.0 / 255.0);\n"  // (smooth high contrast input)
-               "    color.x = clamp((color.x + deltaY), 0.0, 1.0);\n"
-               "    color.y = clamp((color.y + deltaY), 0.0, 1.0);\n"
-               "    color.z = clamp((color.z + deltaY), 0.0, 1.0);\n"
-               "  }\n"
-               "  o = vec4(grade(color.xyz), 1.0);\n"
-               "}\n";
-    }
     // ---- post passes before the present (Video tab "Anti-aliasing" / "Upscaler"): exec.c vk_present_draw.
     // Each draws a fullscreen triangle into an image the size of its output; push constants: two vec4.
     if (!strcmp(name, "post.vert")) {
@@ -547,9 +467,9 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(clamp(c + n / 255.0, 0.0, 1.0), 1.0);\n"
                "}\n";
     }
-    // (LOCAL experiment, DittoSR Experiment: the final pass instead of RCAS - the detail of a 3x3 neighbourhood
-    // (the pixel less its 1-2-1 blur) amplified, dark detail (lines: eyebrows, lashes) by a.x, light by a.y, within the
-    // neighbourhood's range and a.z of it below - lines darken, no halos)
+    // DittoSR's line pass on its in-between images (exec.c post_process_ex; its real frames take x2_final.frag): the
+    // detail of a 3x3 neighbourhood (the pixel less its 1-2-1 blur) amplified, dark detail (lines: eyebrows, lashes) by
+    // a.x, light by a.y, within the neighbourhood's range and a.z of it below - lines darken, no halos
     if (!strcmp(name, "ditto_line.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"
@@ -1130,155 +1050,65 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(mix(c, hc, pc.b.x), 1.0);\n"
                "}\n";
     }
-    // ---- Snapdragon GSR 2 (Qualcomm's Game Super Resolution 2, third_party/snapdragon-gsr/LICENSE.txt: BSD 3-Clause), its 2-pass
-    // fragment variant (sgsr/v2/include/glsl_2_pass_fs) for exec.c gsr2_run: the parameters as push constants instead of
-    // its uniform buffer, gl_FragCoord instead of the vertex shader's uv, and our motion vectors (this frame's uv - the
-    // previous one's, camera and objects: mv_run) instead of its clip-space velocity texture - its motion is in NDC, 2 x
-    // ours, the previous uv uv - 0.5 x motion.
-    // a.xy = render size, a.zw = output size, b.xy = 1 / render size, b.zw = 1 / output size, c.xy = the jitter (render
-    // pixels, Halton(2, 3) - 0.5), c.zw = scaleRatio (output / render width, min(20, (output / render area)^3)),
-    // d.x = tan(horizontal fov / 2), d.y = minLerpContribution (0.3 with the camera still 5 frames), d.z = reset.
+    // ---- DittoSR's convert pass (exec.c gsr2_run): Snapdragon GSR 2's (Qualcomm's Game Super Resolution 2,
+    // third_party/snapdragon-gsr/LICENSE.txt: BSD 3-Clause; its 2-pass fragment variant, sgsr/v2/include/glsl_2_pass_fs)
+    // with the parameters as push constants instead of its uniform buffer, gl_FragCoord instead of the vertex shader's
+    // uv, and our motion vectors (this frame's uv - the previous one's, camera and objects: mv_run) instead of its
+    // clip-space velocity texture - its motion is in NDC, 2 x ours, the previous uv uv - 0.5 x motion. Then the motion
+    // of the nearest of the 3x3 (ours: a moving silhouette's own over the background around it, no trail behind its edges).
+    // a.xy = render size, b.xy = 1 / render size, d.x = tan(horizontal fov / 2).
     // gsr2_convert.frag (render size, RGBA16F): xy = the motion (NDC), z = depth clip (how far this pixel's depth stands
     // out from its 4x4 neighbourhood's: its history is less trusted). t0 = depth (1: far), t1 = our motion vectors.
-    // gsr2_upscale.frag (output size, the history ping-pong): t0 = the previous output, t1 = the convert pass's,
-    // t2 = the colour (render size, fetched); a Lanczos-like 5-tap upsample, the history clamped to their box.
-    if (!strcmp(name, "gsr2_convert.frag") || !strcmp(name, "gsr2_upscale.frag")) {
+    if (!strcmp(name, "gsr2_convert.frag")) {
         *stage = STAGE_FRAGMENT;
-        static const char *common =
-            "#version 450\n"
-            "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; } pc;\n"
-            "layout(location = 0) out vec4 o;\n";
-        static const char *convert =
-            "layout(set = 0, binding = 0) uniform sampler2D InputDepth;\n"
-            "layout(set = 0, binding = 1) uniform sampler2D InputVelocity;\n"
-            "void main() {\n"
-            "  vec2 renderSize = pc.a.xy, renderSizeRcp = pc.b.xy;\n"
-            "  vec2 texCoord = gl_FragCoord.xy * renderSizeRcp;\n"
-            "  vec2 gatherCoord = texCoord - vec2(0.5) * renderSizeRcp;\n"
-            "  vec4 btmLeft = textureGather(InputDepth, gatherCoord, 0);\n"
-            "  vec4 btmRight = textureGather(InputDepth, gatherCoord + vec2(renderSizeRcp.x * 2.0, 0.0), 0);\n"
-            "  vec4 topLeft = textureGather(InputDepth, gatherCoord + vec2(0.0, renderSizeRcp.y * 2.0), 0);\n"
-            "  vec4 topRight = textureGather(InputDepth, gatherCoord + renderSizeRcp * 2.0, 0);\n"
-            "  float maxC = min(min(min(btmLeft.z, btmRight.w), topLeft.y), topRight.x);\n"
-            "  float btmLeft4 = min(min(min(btmLeft.y, btmLeft.x), btmLeft.z), btmLeft.w);\n"
-            "  float depthclip = 0.0;\n"
-            "  if (maxC < 1.0 - 1.0e-05) {\n"
-            "    float btmRight4 = min(min(min(btmRight.y, btmRight.x), btmRight.z), btmRight.w);\n"
-            "    float topLeft4 = min(min(min(topLeft.y, topLeft.x), topLeft.z), topLeft.w);\n"
-            "    float topRight4 = min(min(min(topRight.y, topRight.x), topRight.z), topRight.w);\n"
-            "    float Ksep_Kfov_diagonal = 1.37e-05 * pc.d.x * length(renderSize);\n"
-            "    float Depthsep = Ksep_Kfov_diagonal * (1.0 - maxC);\n"
-            "    float Wdepth = clamp(Depthsep / (abs(maxC - btmLeft4) + 1.19e-07), 0.0, 1.0)\n"
-            "                 + clamp(Depthsep / (abs(maxC - btmRight4) + 1.19e-07), 0.0, 1.0)\n"
-            "                 + clamp(Depthsep / (abs(maxC - topLeft4) + 1.19e-07), 0.0, 1.0)\n"
-            "                 + clamp(Depthsep / (abs(maxC - topRight4) + 1.19e-07), 0.0, 1.0);\n"
-            "    depthclip = clamp(1.0 - Wdepth * 0.25, 0.0, 1.0);\n"
-            "  }\n"
-            "  ivec2 ms = textureSize(InputVelocity, 0);\n"
-            "  ivec2 mp = clamp(ivec2(texCoord * vec2(ms)), ivec2(0), ms - 1);\n"
-            // (Experiment 2, e.x = 1: the motion of the nearest of the 3x3 - a moving silhouette's own over the
-            // background around it, no trail behind its edges)
-            "  if (pc.e.x > 0.5) {\n"
-            "    ivec2 dp = ivec2(gl_FragCoord.xy), ds = textureSize(InputDepth, 0) - 1, best = ivec2(0);\n"
-            "    float dmin = 2.0;\n"
-            "    for (int i = 0; i < 9; i++) {\n"
-            "      ivec2 q = ivec2(i % 3 - 1, i / 3 - 1);\n"
-            "      float dd = texelFetch(InputDepth, clamp(dp + q, ivec2(0), ds), 0).r;\n"
-            "      if (dd < dmin) { dmin = dd; best = q; }\n"
-            "    }\n"
-            "    mp = clamp(mp + best, ivec2(0), ms - 1);\n"
-            "  }\n"
-            "  vec2 v = texelFetch(InputVelocity, mp, 0).xy;\n"
-            "  float dc = texelFetch(InputDepth, clamp(ivec2(gl_FragCoord.xy), ivec2(0), textureSize(InputDepth, 0) - 1), 0).r;\n"
-            "  o = vec4(2.0 * v, depthclip, log2(max(1.0 - dc, 1e-7)));\n"
-            "}\n";
-        // (the upscale in half precision but its coordinates, as Qualcomm's: in full precision it took 2.5 ms of an
-        // Adreno 830's frame at 2133 x 1200)
-        static const char *upscale =
-            "precision mediump float;\n"
-            "precision highp int;\n"
-            "layout(set = 0, binding = 0) uniform sampler2D PrevOutput;\n"
-            "layout(set = 0, binding = 1) uniform sampler2D MotionDepthClipAlphaBuffer;\n"
-            "layout(set = 0, binding = 2) uniform sampler2D InputColor;\n"
-            "float FastLanczos(float base) { float y = base - 1.0, y2 = y * y; return (0.75 * y + y2) * y2; }\n"
-            "void tap(vec3 c, vec2 off, float kernelbias2, float curvebias, inout vec4 cw, inout vec3 mn, inout vec3 mx,\n"
-            "         inout vec3 center, inout vec3 var, inout float bw) {\n"
-            "  float d = dot(off, off);\n"
-            "  float w = FastLanczos(clamp(d * kernelbias2, 0.0, 1.0));\n"
-            "  cw += vec4(c * w, w);\n"
-            "  float boxweight = exp(d * curvebias);\n"
-            "  mn = min(mn, c); mx = max(mx, c);\n"
-            "  vec3 ws = c * boxweight;\n"
-            "  center += ws; var += c * ws; bw += boxweight;\n"
-            "}\n"
-            "void main() {\n"
-            "  highp vec2 renderSize = pc.a.xy, outputSize = pc.a.zw, renderSizeRcp = pc.b.xy, outputSizeRcp = pc.b.zw;\n"
-            "  highp vec2 jitterOffset = pc.c.xy;\n"
-            "  float Biasmax_viewportXScale = pc.c.z, scalefactor = pc.c.w;\n"
-            "  highp vec2 Hruv = gl_FragCoord.xy * outputSizeRcp;\n"
-            "  highp vec2 Jitteruv = clamp(Hruv + jitterOffset * renderSizeRcp, 0.0, 1.0);\n"
-            "  ivec2 InputPos = ivec2(Jitteruv * renderSize);\n"
-            "  vec3 mda = textureLod(MotionDepthClipAlphaBuffer, Jitteruv, 0.0).xyz;\n"
-            "  vec2 Motion = mda.xy;\n"
-            "  highp vec2 PrevUV = clamp(-0.5 * Motion + Hruv, 0.0, 1.0);\n"
-            "  float depthfactor = mda.z;\n"
-            "  vec3 HistoryColor = textureLod(PrevOutput, PrevUV, 0.0).xyz;\n"
-            "  float biasmax = Biasmax_viewportXScale;\n"
-            "  float biasmin = max(1.0, 0.3 + 0.3 * biasmax);\n"
-            "  float kernelbias = mix(biasmax, biasmin, 0.25 * depthfactor) * 0.5;\n"
-            "  float kernelbias2 = kernelbias * kernelbias;\n"
-            "  float motion_viewport_len = length(Motion * outputSize);\n"
-            "  float curvebias = mix(-2.0, -3.0, clamp(motion_viewport_len * 0.02, 0.0, 1.0));\n"
-            "  highp vec2 srcpos = vec2(InputPos) + vec2(0.5) - jitterOffset;\n"
-            "  vec2 so = srcpos - Hruv * renderSize;\n"
-            "  ivec2 cs = textureSize(InputColor, 0) - 1;\n"
-            "  vec3 c0 = texelFetch(InputColor, clamp(InputPos + ivec2(0, 1), ivec2(0), cs), 0).xyz;\n"
-            "  vec4 cw = vec4(0.0); vec3 center = vec3(0.0), var = vec3(0.0); float bw = 0.0;\n"
-            "  vec3 mn = c0, mx = c0;\n"
-            "  tap(c0, so + vec2(0.0, 1.0), kernelbias2, curvebias, cw, mn, mx, center, var, bw);\n"
-            "  tap(texelFetch(InputColor, clamp(InputPos + ivec2(1, 0), ivec2(0), cs), 0).xyz, so + vec2(1.0, 0.0), kernelbias2, curvebias, cw, mn, mx, center, var, bw);\n"
-            "  tap(texelFetch(InputColor, clamp(InputPos + ivec2(-1, 0), ivec2(0), cs), 0).xyz, so + vec2(-1.0, 0.0), kernelbias2, curvebias, cw, mn, mx, center, var, bw);\n"
-            "  tap(texelFetch(InputColor, clamp(InputPos, ivec2(0), cs), 0).xyz, so, kernelbias2, curvebias, cw, mn, mx, center, var, bw);\n"
-            "  tap(texelFetch(InputColor, clamp(InputPos + ivec2(0, -1), ivec2(0), cs), 0).xyz, so + vec2(0.0, -1.0), kernelbias2, curvebias, cw, mn, mx, center, var, bw);\n"
-            "  bw = 1.0 / bw;\n"
-            "  center *= bw; var *= bw;\n"
-            "  var = sqrt(abs(var - center * center));\n"
-            "  cw.xyz = clamp(cw.xyz / cw.w, mn - vec3(0.075), mx + vec3(0.075));\n"
-            "  cw.w *= 1.0 / 3.0;\n"
-            "  float baseupdate = 1.0 - depthfactor;\n"
-            "  baseupdate = min(baseupdate, mix(baseupdate, cw.w * 10.0, clamp(10.0 * motion_viewport_len, 0.0, 1.0)));\n"
-            "  baseupdate = min(baseupdate, mix(baseupdate, cw.w, clamp(motion_viewport_len * 0.05, 0.0, 1.0)));\n"
-            "  float basealpha = baseupdate;\n"
-            "  float boxscale = max(depthfactor, clamp(motion_viewport_len * 0.05, 0.0, 1.0));\n"
-            "  float boxsize = mix(scalefactor, 1.0, boxscale);\n"
-            "  vec3 sboxvar = var * boxsize;\n"
-            "  mx = min(mx, center + sboxvar);\n"
-            "  mn = max(mn, center - sboxvar);\n"
-            "  vec3 clampedcolor = clamp(HistoryColor, mn, mx);\n"
-            "  float startLerpValue = (abs(mda.x) + abs(mda.y)) > 0.000001 ? 0.0 : pc.d.y;\n"
-            "  float lerpcontribution = (any(greaterThan(mn, HistoryColor)) || any(greaterThan(HistoryColor, mx))) ? startLerpValue : 1.0;\n"
-            "  HistoryColor = mix(clampedcolor, HistoryColor, clamp(lerpcontribution, 0.0, 1.0));\n"
-            "  basealpha = mix(min(basealpha, 0.1), basealpha, clamp(lerpcontribution, 0.0, 1.0));\n"
-            "  float alphasum = max(1.192e-07, basealpha + cw.w);\n"
-            "  float alpha = clamp(cw.w / alphasum + pc.d.z, 0.0, 1.0);\n"
-            "  o = vec4(alpha >= 1.0 ? cw.xyz : mix(HistoryColor, cw.xyz, alpha), 1.0);\n"  // (a reset: a new history's contents unread)
-            "}\n";
-        static char *src[2];
-        int k = !strcmp(name, "gsr2_upscale.frag");
-        if (!src[k]) {
-            const char *body = k ? upscale : convert;
-            size_t n = strlen(common) + strlen(body) + 1;
-            src[k] = malloc(n);
-            snprintf(src[k], n, "%s%s", common, body);
-        }
-        return src[k];
+        return "#version 450\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "layout(set = 0, binding = 0) uniform sampler2D InputDepth;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D InputVelocity;\n"
+               "void main() {\n"
+               "  vec2 renderSize = pc.a.xy, renderSizeRcp = pc.b.xy;\n"
+               "  vec2 texCoord = gl_FragCoord.xy * renderSizeRcp;\n"
+               "  vec2 gatherCoord = texCoord - vec2(0.5) * renderSizeRcp;\n"
+               "  vec4 btmLeft = textureGather(InputDepth, gatherCoord, 0);\n"
+               "  vec4 btmRight = textureGather(InputDepth, gatherCoord + vec2(renderSizeRcp.x * 2.0, 0.0), 0);\n"
+               "  vec4 topLeft = textureGather(InputDepth, gatherCoord + vec2(0.0, renderSizeRcp.y * 2.0), 0);\n"
+               "  vec4 topRight = textureGather(InputDepth, gatherCoord + renderSizeRcp * 2.0, 0);\n"
+               "  float maxC = min(min(min(btmLeft.z, btmRight.w), topLeft.y), topRight.x);\n"
+               "  float btmLeft4 = min(min(min(btmLeft.y, btmLeft.x), btmLeft.z), btmLeft.w);\n"
+               "  float depthclip = 0.0;\n"
+               "  if (maxC < 1.0 - 1.0e-05) {\n"
+               "    float btmRight4 = min(min(min(btmRight.y, btmRight.x), btmRight.z), btmRight.w);\n"
+               "    float topLeft4 = min(min(min(topLeft.y, topLeft.x), topLeft.z), topLeft.w);\n"
+               "    float topRight4 = min(min(min(topRight.y, topRight.x), topRight.z), topRight.w);\n"
+               "    float Ksep_Kfov_diagonal = 1.37e-05 * pc.d.x * length(renderSize);\n"
+               "    float Depthsep = Ksep_Kfov_diagonal * (1.0 - maxC);\n"
+               "    float Wdepth = clamp(Depthsep / (abs(maxC - btmLeft4) + 1.19e-07), 0.0, 1.0)\n"
+               "                 + clamp(Depthsep / (abs(maxC - btmRight4) + 1.19e-07), 0.0, 1.0)\n"
+               "                 + clamp(Depthsep / (abs(maxC - topLeft4) + 1.19e-07), 0.0, 1.0)\n"
+               "                 + clamp(Depthsep / (abs(maxC - topRight4) + 1.19e-07), 0.0, 1.0);\n"
+               "    depthclip = clamp(1.0 - Wdepth * 0.25, 0.0, 1.0);\n"
+               "  }\n"
+               "  ivec2 ms = textureSize(InputVelocity, 0);\n"
+               "  ivec2 mp = clamp(ivec2(texCoord * vec2(ms)), ivec2(0), ms - 1);\n"
+               "  ivec2 dp = ivec2(gl_FragCoord.xy), ds = textureSize(InputDepth, 0) - 1, best = ivec2(0);\n"
+               "  float dmin = 2.0;\n"
+               "  for (int i = 0; i < 9; i++) {\n"
+               "    ivec2 q = ivec2(i % 3 - 1, i / 3 - 1);\n"
+               "    float dd = texelFetch(InputDepth, clamp(dp + q, ivec2(0), ds), 0).r;\n"
+               "    if (dd < dmin) { dmin = dd; best = q; }\n"
+               "  }\n"
+               "  vec2 v = texelFetch(InputVelocity, clamp(mp + best, ivec2(0), ms - 1), 0).xy;\n"
+               "  o = vec4(2.0 * v, depthclip, 0.0);\n"
+               "}\n";
     }
-    // ---- LOCAL experiment, DittoSR Experiment 2 (exec.c gsr2_run, UPSCALE_DITTO_EXP2): GSR 2's convert pass, then an
-    // upscale of our own, and a final pass. Push constants as GSR 2's (a = render size, output size; b = their reciprocals;
-    // c.xy = the jitter, c.z = output / render width; d.z = reset; research knobs, 0 their defaults: d.x the history's
-    // largest weight (10), d.y the confidence the narrow estimate is taken alone from (0.3), d.w the history clip width at rest (1.5).
+    // ---- DittoSR (exec.c gsr2_run, UPSCALE_DITTOSR): GSR 2's convert pass, then an upscale of our own, and a final
+    // pass. Push constants as GSR 2's (a = render size, output size; b = their reciprocals; c.xy = the jitter, c.z = output
+    // / render width; d.z = reset; research knobs, 0 their defaults: d.x the history's largest weight (10), d.y the
+    // confidence the narrow estimate is taken alone from (0.3), d.w the history clip width at rest (1.5).
     // x2_upscale.frag (80 bytes of constants: e.x the reaction to changes, e.y the edge-directed Gaussian, e.z thin
-    // lines kept): t0 = the previous output, t1 = gsr2_convert's (xy motion in NDC, z depth clip), t2 = the colour.
+    // lines kept, e.w DittoSR Net's corrections): t0 = the previous output, t1 = gsr2_convert's (xy motion in NDC, z depth
+    // clip), t2 = the colour, t3 the network's corrections, t4 = the previous frame's gsr2_convert, t5 = x2_change.frag's.
     //   The current frame: the 3x3 render samples around the pixel, each where its jitter put it, weighted by a Gaussian
     //   of its distance in output pixels (narrow: confident where a sample landed close) and by a wider one in render
     //   pixels (smooth: where none did; mostly the narrow one). The history: Catmull-Rom at the previous position, clipped toward the samples'
@@ -1286,12 +1116,15 @@ static const char *builtin_src(const char *name, int *stage) {
     //   weight: the history keeps its accumulated weight (alpha: RGBA16F), less when clipped, moving or where the depth
     //   stands out, at most d.x (10); the new frame adds its samples' nearness (0.03 - 1) - a weighted mean of every
     //   jittered sample, not a fixed share (GSR 2's stepped share made its pattern; a fixed one stepped the edges).
+    //   Against ghosting: where the motion differs from the previous frame's where the pixel was (another object there
+    //   now), less history and a narrower box; moving, the box within the 9 samples' own min / max. The fast settling:
+    //   with much of the image changed (x2_change.frag), the reaction takes the new frame up to 0.95 instead of 0.5.
     // x2_final.frag: the line pass (ditto_line.frag's: a.x dark, a.y light, a.z below) and the interface composited
-    //   (gsr2_final.frag's: a.w = 1 with a mask), in one pass. t0 = the upscale, t1 = the image (render size), m = mask.
+    //   (a.w = 1 with a mask: ui_composite.frag's), in one pass. t0 = the upscale, t1 = the image (render size), m = mask.
     if (!strcmp(name, "x2_upscale.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"
-               "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; vec4 f; } pc;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; } pc;\n"
                "layout(location = 0) out vec4 o;\n"
                "layout(set = 0, binding = 0) uniform sampler2D PrevOutput;\n"
                "layout(set = 0, binding = 1) uniform sampler2D MotionDepthClip;\n"
@@ -1332,7 +1165,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "  float g = length(vec2(gx, gy)), es = clamp(g / (4.0 * (lmx - lmn) + 1e-3), 0.0, 1.0);\n"
                "  vec2 nrm = g > 1e-5 ? vec2(gx, gy) / g : vec2(1.0, 0.0);\n"
                "  float along = 1.0 - 0.75 * pc.e.y * es;\n"
-               // (Experiment 2 Net, e.w = 1: the network's corrections - srnet.comp's, at the render size)
+               // (DittoSR Net, e.w = 1: the network's corrections - srnet.comp's, at the render size)
                "  vec4 cn = pc.e.w > 0.5 ? textureLod(CorrA, uv, 0.0) : vec4(0.0);\n"
                "  if (pc.e.w > 0.5) { ks *= exp(0.5 * cn.x); along = clamp(along * exp(cn.y), 0.05, 4.0); }\n"
                // the thin line (e.z): the centre sample a local extreme of its 3x3 - a lash, an eyebrow
@@ -1363,20 +1196,19 @@ static const char *builtin_src(const char *name, int *stage) {
                "  bool off = any(lessThan(puv, vec2(0.0))) || any(greaterThan(puv, vec2(1.0)));\n"
                "  if (pc.d.z > 0.5 || off) { o = vec4(cs2, 1.0); return; }\n"
                "  vec3 hy = ycc(hist(puv));\n"
-               // (the previous frame's motion and depth where this pixel was: f.y, the depth changed - a surface replaced, an
-               // animated limb, a disocclusion; f.z, the motion changed - another object's. Each: less history, a narrower box)
-               "  vec4 pm = (pc.f.y > 0.0 || pc.f.z > 0.0) ? textureLod(PrevMda, puv, 0.0) : vec4(0.0);\n"
-               "  float rj = pc.f.y * smoothstep(0.1, 0.3, abs(mda4.w - pm.w));\n"
-               "  rj = max(rj, pc.f.z * smoothstep(0.5, 2.0, length(0.5 * (mda4.xy - pm.xy) * os)));\n"
-               // (f.x: the share of the image that changed against its history - x2_change.frag's one pixel)
-               "  float gch = pc.f.x > 0.0 ? pc.f.x * smoothstep(0.2, 0.5, texelFetch(Change, ivec2(0), 0).r) : 0.0;\n"
+               // (the previous frame's motion where this pixel was: changed by over half a pixel - another object's - less
+               // history, a narrower box)
+               "  vec4 pm = textureLod(PrevMda, puv, 0.0);\n"
+               "  float rj = smoothstep(0.5, 2.0, length(0.5 * (mda4.xy - pm.xy) * os));\n"
+               // (the share of the image that changed against its history - x2_change.frag's one pixel)
+               "  float gch = smoothstep(0.2, 0.5, texelFetch(Change, ivec2(0), 0).r);\n"
                "  float rest = pc.d.w > 0.0 ? pc.d.w : 1.5;\n"
                "  float gam = mix(rest, 0.9, clamp(mlen * 0.25, 0.0, 1.0)) * (1.0 - 0.5 * mda.z);\n"
                "  gam = mix(gam, 1.5 * rest, lockf) * exp(cn.z);\n"
                "  gam *= 1.0 - 0.6 * rj;\n"
-               // (f.w, moving: the box mean +- gamma sigma within the samples' own range - min / max, as far as the pixel moves)
+               // (moving: the box mean +- gamma sigma within the samples' own range - min / max, as far as the pixel moves)
                "  vec3 blo = m1 - gam * sig, bhi = m1 + gam * sig;\n"
-               "  float mm = pc.f.w * clamp(mlen * 0.5, 0.0, 1.0);\n"
+               "  float mm = clamp(mlen * 0.5, 0.0, 1.0);\n"
                "  blo = mix(blo, max(blo, ymn), mm); bhi = mix(bhi, min(bhi, ymx), mm);\n"
                "  vec3 bc = 0.5 * (blo + bhi), ext3 = 0.5 * (bhi - blo) + vec3(1.0 / 255.0);\n"
                "  vec3 dir = hy - bc;\n"
@@ -1393,104 +1225,6 @@ static const char *builtin_src(const char *name, int *stage) {
                "  a = mix(a, max(a, 0.6), rj);\n"
                "  if (pc.e.w > 0.5) { float ac = clamp(a, 1e-3, 1.0 - 1e-3); a = 1.0 / (1.0 + exp(-(log(ac / (1.0 - ac)) + cn.w))); }\n"
                "  o = vec4(mix(rgb(hy), cur, clamp(a, 0.0, 1.0)), 1.0);\n"
-               "}\n";
-    }
-    // x2b_upscale.frag (LOCAL experiment, DittoSR Experiment 2's mode 1: LARECOMP_EXP2_MODE=1): GSR 2's upscale
-    // (gsr2_upscale.frag, its parameters) with three changes against its pattern in motion - the history read by
-    // Catmull-Rom (not bilinear: its blur differed pixel to pixel), clipped toward its box's centre (not clamped per
-    // channel), and moving, the new frame's share kept within 0.15 - 0.6 (not GSR 2's 0 - 1 by each pixel's taps).
-    if (!strcmp(name, "x2b_upscale.frag")) {
-        *stage = STAGE_FRAGMENT;
-        return "#version 450\n"
-               "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; } pc;\n"
-               "layout(location = 0) out vec4 o;\n"
-               "precision mediump float;\n"
-               "precision highp int;\n"
-               "layout(set = 0, binding = 0) uniform sampler2D PrevOutput;\n"
-               "layout(set = 0, binding = 1) uniform sampler2D MotionDepthClipAlphaBuffer;\n"
-               "layout(set = 0, binding = 2) uniform sampler2D InputColor;\n"
-               "float FastLanczos(float base) { float y = base - 1.0, y2 = y * y; return (0.75 * y + y2) * y2; }\n"
-               "void tap(vec3 c, vec2 off, float kernelbias2, float curvebias, inout vec4 cw, inout vec3 mn, inout vec3 mx,\n"
-               "         inout vec3 center, inout vec3 var, inout float bw) {\n"
-               "  float d = dot(off, off);\n"
-               "  float w = FastLanczos(clamp(d * kernelbias2, 0.0, 1.0));\n"
-               "  cw += vec4(c * w, w);\n"
-               "  float boxweight = exp(d * curvebias);\n"
-               "  mn = min(mn, c); mx = max(mx, c);\n"
-               "  vec3 ws = c * boxweight;\n"
-               "  center += ws; var += c * ws; bw += boxweight;\n"
-               "}\n"
-               "vec3 hist(highp vec2 uv) {\n"
-               "  highp vec2 sz = pc.a.zw, p = uv * sz, c1 = floor(p - 0.5) + 0.5;\n"
-               "  vec2 f = p - c1;\n"
-               "  vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f);\n"
-               "  vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f), w12 = w1 + w2;\n"
-               "  highp vec2 q0 = (c1 - 1.0) / sz, q3 = (c1 + 2.0) / sz, q12 = (c1 + w2 / w12) / sz;\n"
-               "  vec3 r = textureLod(PrevOutput, vec2(q12.x, q0.y), 0.0).rgb * w12.x * w0.y\n"
-               "         + textureLod(PrevOutput, vec2(q0.x, q12.y), 0.0).rgb * w0.x * w12.y\n"
-               "         + textureLod(PrevOutput, q12, 0.0).rgb * w12.x * w12.y\n"
-               "         + textureLod(PrevOutput, vec2(q3.x, q12.y), 0.0).rgb * w3.x * w12.y\n"
-               "         + textureLod(PrevOutput, vec2(q12.x, q3.y), 0.0).rgb * w12.x * w3.y;\n"
-               "  float ws = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;\n"
-               "  return clamp(r / ws, 0.0, 1.0);\n"
-               "}\n"
-               "void main() {\n"
-               "  highp vec2 renderSize = pc.a.xy, outputSize = pc.a.zw, renderSizeRcp = pc.b.xy, outputSizeRcp = pc.b.zw;\n"
-               "  highp vec2 jitterOffset = pc.c.xy;\n"
-               "  float Biasmax_viewportXScale = pc.c.z, scalefactor = pc.c.w;\n"
-               "  highp vec2 Hruv = gl_FragCoord.xy * outputSizeRcp;\n"
-               "  highp vec2 Jitteruv = clamp(Hruv + jitterOffset * renderSizeRcp, 0.0, 1.0);\n"
-               "  ivec2 InputPos = ivec2(Jitteruv * renderSize);\n"
-               "  vec3 mda = textureLod(MotionDepthClipAlphaBuffer, Jitteruv, 0.0).xyz;\n"
-               "  vec2 Motion = mda.xy;\n"
-               "  highp vec2 PrevUV = clamp(-0.5 * Motion + Hruv, 0.0, 1.0);\n"
-               "  float depthfactor = mda.z;\n"
-               "  vec3 HistoryColor = hist(PrevUV);\n"
-               "  float biasmax = Biasmax_viewportXScale;\n"
-               "  float biasmin = max(1.0, 0.3 + 0.3 * biasmax);\n"
-               "  float kernelbias = mix(biasmax, biasmin, 0.25 * depthfactor) * 0.5;\n"
-               "  float kernelbias2 = kernelbias * kernelbias;\n"
-               "  float motion_viewport_len = length(Motion * outputSize);\n"
-               "  float curvebias = mix(-2.0, -3.0, clamp(motion_viewport_len * 0.02, 0.0, 1.0));\n"
-               "  highp vec2 srcpos = vec2(InputPos) + vec2(0.5) - jitterOffset;\n"
-               "  vec2 so = srcpos - Hruv * renderSize;\n"
-               "  ivec2 cs = textureSize(InputColor, 0) - 1;\n"
-               "  vec3 c0 = texelFetch(InputColor, clamp(InputPos + ivec2(0, 1), ivec2(0), cs), 0).xyz;\n"
-               "  vec4 cw = vec4(0.0); vec3 center = vec3(0.0), var = vec3(0.0); float bw = 0.0;\n"
-               "  vec3 mn = c0, mx = c0;\n"
-               "  tap(c0, so + vec2(0.0, 1.0), kernelbias2, curvebias, cw, mn, mx, center, var, bw);\n"
-               "  tap(texelFetch(InputColor, clamp(InputPos + ivec2(1, 0), ivec2(0), cs), 0).xyz, so + vec2(1.0, 0.0), kernelbias2, curvebias, cw, mn, mx, center, var, bw);\n"
-               "  tap(texelFetch(InputColor, clamp(InputPos + ivec2(-1, 0), ivec2(0), cs), 0).xyz, so + vec2(-1.0, 0.0), kernelbias2, curvebias, cw, mn, mx, center, var, bw);\n"
-               "  tap(texelFetch(InputColor, clamp(InputPos, ivec2(0), cs), 0).xyz, so, kernelbias2, curvebias, cw, mn, mx, center, var, bw);\n"
-               "  tap(texelFetch(InputColor, clamp(InputPos + ivec2(0, -1), ivec2(0), cs), 0).xyz, so + vec2(0.0, -1.0), kernelbias2, curvebias, cw, mn, mx, center, var, bw);\n"
-               "  bw = 1.0 / bw;\n"
-               "  center *= bw; var *= bw;\n"
-               "  var = sqrt(abs(var - center * center));\n"
-               "  cw.xyz = clamp(cw.xyz / cw.w, mn - vec3(0.075), mx + vec3(0.075));\n"
-               "  cw.w *= 1.0 / 3.0;\n"
-               "  float baseupdate = 1.0 - depthfactor;\n"
-               "  baseupdate = min(baseupdate, mix(baseupdate, cw.w * 10.0, clamp(10.0 * motion_viewport_len, 0.0, 1.0)));\n"
-               "  baseupdate = min(baseupdate, mix(baseupdate, cw.w, clamp(motion_viewport_len * 0.05, 0.0, 1.0)));\n"
-               "  float basealpha = baseupdate;\n"
-               "  float boxscale = max(depthfactor, clamp(motion_viewport_len * 0.05, 0.0, 1.0));\n"
-               "  float boxsize = max(mix(scalefactor, 1.0, boxscale), pc.d.x > 0.0 ? pc.d.x : 1.0);\n"
-               "  vec3 sboxvar = var * boxsize;\n"
-               "  mx = min(mx, center + sboxvar);\n"
-               "  mn = max(mn, center - sboxvar);\n"
-               "  vec3 cc = 0.5 * (mn + mx), ext = 0.5 * (mx - mn) + vec3(1.0 / 512.0), dir = HistoryColor - cc;\n"
-               "  vec3 ad = abs(dir) / ext;\n"
-               "  float t = max(ad.x, max(ad.y, ad.z));\n"
-               "  vec3 clampedcolor = t > 1.0 ? cc + dir / t : HistoryColor;\n"
-               "  float startLerpValue = (abs(mda.x) + abs(mda.y)) > 0.000001 ? 0.0 : pc.d.y;\n"
-               "  float lerpcontribution = t > 1.0 ? startLerpValue : 1.0;\n"
-               "  HistoryColor = mix(clampedcolor, HistoryColor, clamp(lerpcontribution, 0.0, 1.0));\n"
-               "  basealpha = mix(min(basealpha, 0.1), basealpha, clamp(lerpcontribution, 0.0, 1.0));\n"
-               "  float alphasum = max(1.192e-07, basealpha + cw.w);\n"
-               "  float alpha = clamp(cw.w / alphasum, 0.0, 1.0);\n"
-               "  float mf = clamp(motion_viewport_len * 0.05, 0.0, 1.0);\n"
-               "  alpha = mix(alpha, clamp(alpha, 0.15, pc.d.w > 0.0 ? pc.d.w : 0.6), mf);\n"
-               "  alpha = clamp(alpha + pc.d.z, 0.0, 1.0);\n"
-               "  o = vec4(alpha >= 1.0 ? cw.xyz : mix(HistoryColor, cw.xyz, alpha), 1.0);\n"
                "}\n";
     }
     if (!strcmp(name, "x2_final.frag")) {
@@ -1521,7 +1255,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "  vec3 g = tap(ip + ivec2(-1, 1)), h = tap(ip + ivec2(0, 1)), i = tap(ip + ivec2(1, 1));\n"
                "  vec3 blur = (4.0 * e + 2.0 * (b + d + f + h) + (a + c + g + i)) / 16.0, det = e - blur;\n"
                "  vec2 uv = gl_FragCoord.xy * pc.b.zw;\n"
-               // (Experiment 2 Net, c.x = 1: the line's strength by the network - srnet.comp's CorrB.x)
+               // (DittoSR Net, c.x = 1: the line's strength by the network - srnet.comp's CorrB.x)
                "  float ls = pc.c.x > 0.5 ? exp(textureLod(CorrB, uv, 0.0).x) : 1.0;\n"
                "  vec3 r = e + (dot(det, vec3(0.25, 0.5, 0.25)) < 0.0 ? pc.a.x : pc.a.y) * ls * det;\n"
                "  vec3 mn = min(min(min(a, b), min(c, d)), min(min(e, f), min(min(g, h), i)));\n"
@@ -1531,7 +1265,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(k > 0.0 ? mix(r, cr(uv), k) : r, 1.0);\n"
                "}\n";
     }
-    // x2_change.frag (DittoSR Experiment 2's global reaction, exec.c gsr2_run, exp2_greact): a.x = 0, a 4 x 4 image (R16F),
+    // x2_change.frag (DittoSR's fast settling, exec.c gsr2_run): a.x = 0, a 4 x 4 image (R16F),
     // each pixel 16 points of a 16 x 16 grid over the render image - the share of them whose colour this frame differs
     // from the history (the previous upscale) where the point was by over 0.1 in luma; a.x = 1, that image averaged into
     // one pixel (t0), the one texel x2_upscale.frag reads (the 4 x 4 read by every pixel: +0.025 ms at 4K; the 256 points
@@ -1566,7 +1300,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(n > 0.0 ? c / n : 0.0);\n"
                "}\n";
     }
-    // ---- LOCAL experiment, Experiment 2 Net (exec.c srnet_run, UPSCALE_X2_NET): the tiny network of tools/srnet (3895
+    // ---- LOCAL experiment, DittoSR Net (exec.c srnet_run, UPSCALE_DITTOSR_NET): the tiny network of tools/srnet (3895
     // parameters, srnet_weights.h; trained on our own captures) at the render size, one compute pass: a 16 x 16 tile, its
     // inputs over a 2-pixel border and its first layer over a 1-pixel border in shared memory (zero off the image, as
     // the training's padding). Inputs per render pixel: the colour (YCoCg), the depth clip and the motion (log of its
@@ -1686,53 +1420,6 @@ static const char *builtin_src(const char *name, int *stage) {
                "  if (mode == 1) o = vec4(texelFetch(t, q, 0).rgb, pc.b.x > 0.5 ? texelFetch(m, q, 0).r : 0.0);\n"
                "  else if (mode == 2) o = vec4(texelFetch(dep, q, 0).r);\n"
                "  else o = vec4(texelFetch(mv, q, 0).xy, 0.0, 0.0);\n"
-               "}\n";
-    }
-    // GSR 2's output finished in one pass (exec.c post_process_ex): sharpened by RCAS (rcas.frag's, a.x its strength: 0
-    // none), then the interface composited where the mask says interface (ui_composite.frag's: t1 by Catmull-Rom).
-    // t0 = GSR 2's output, t1 = the image it was given (render size), m = the interface mask (render size; a.y = 1 when
-    // there is one). b.xy = the output's size, b.zw = 1 / it. In half precision but the coordinates (gsr2_upscale.frag's).
-    if (!strcmp(name, "gsr2_final.frag")) {
-        *stage = STAGE_FRAGMENT;
-        return "#version 450\n"
-               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
-               "precision mediump float;\n"
-               "precision highp int;\n"
-               "layout(set = 0, binding = 0) uniform sampler2D t0;\n"
-               "layout(set = 0, binding = 1) uniform sampler2D t1;\n"
-               "layout(set = 0, binding = 2) uniform sampler2D m;\n"
-               "layout(location = 0) out vec4 o;\n"
-               "vec3 tap(ivec2 p) { return texelFetch(t0, clamp(p, ivec2(0), ivec2(pc.b.xy) - 1), 0).rgb; }\n"
-               "float lum(vec3 c) { return c.g + 0.5 * (c.r + c.b); }\n"
-               "vec3 cr(highp vec2 uv) {\n"
-               "  highp vec2 sz = vec2(textureSize(t1, 0)), p = uv * sz, c1 = floor(p - 0.5) + 0.5;\n"
-               "  vec2 f = p - c1;\n"
-               "  vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f);\n"
-               "  vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f);\n"
-               "  vec2 w12 = w1 + w2;\n"
-               "  highp vec2 q0 = (c1 - 1.0) / sz, q3 = (c1 + 2.0) / sz, q12 = (c1 + w2 / w12) / sz;\n"
-               "  vec3 r = texture(t1, vec2(q12.x, q0.y)).rgb * w12.x * w0.y + texture(t1, vec2(q0.x, q12.y)).rgb * w0.x * w12.y\n"
-               "         + texture(t1, q12).rgb * w12.x * w12.y + texture(t1, vec2(q3.x, q12.y)).rgb * w3.x * w12.y\n"
-               "         + texture(t1, vec2(q12.x, q3.y)).rgb * w12.x * w3.y;\n"
-               "  float ws = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;\n"
-               "  return clamp(r / ws, 0.0, 1.0);\n"
-               "}\n"
-               "void main() {\n"
-               "  ivec2 ip = ivec2(gl_FragCoord.xy);\n"
-               "  vec3 b = tap(ip + ivec2(0, -1)), d = tap(ip + ivec2(-1, 0)), e = tap(ip), f = tap(ip + ivec2(1, 0)), h = tap(ip + ivec2(0, 1));\n"
-               "  float bL = lum(b), dL = lum(d), eL = lum(e), fL = lum(f), hL = lum(h);\n"
-               "  float nz = 0.25 * (bL + dL + fL + hL) - eL;\n"
-               "  float rng = max(max(max(bL, dL), max(eL, fL)), hL) - min(min(min(bL, dL), min(eL, fL)), hL);\n"
-               "  nz = 1.0 - 0.5 * clamp(abs(nz) / max(rng, 1.0 / 65536.0), 0.0, 1.0);\n"
-               "  vec3 mn4 = min(min(b, d), min(f, h)), mx4 = max(max(b, d), max(f, h));\n"
-               "  vec3 hitMin = min(mn4, e) / max(4.0 * mx4, vec3(1.0 / 65536.0));\n"
-               "  vec3 hitMax = (1.0 - max(mx4, e)) / min(4.0 * mn4 - 4.0, vec3(-1.0 / 65536.0));\n"
-               "  vec3 lobeRGB = max(-hitMin, hitMax);\n"
-               "  float lobe = max(-(0.25 - 1.0 / 16.0), min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0)) * pc.a.x * nz;\n"
-               "  vec3 r = (lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0);\n"
-               "  highp vec2 uv = gl_FragCoord.xy * pc.b.zw;\n"
-               "  float k = pc.a.y > 0.5 ? texture(m, uv).r : 0.0;\n"
-               "  o = vec4(k > 0.0 ? mix(r, cr(uv), k) : r, 1.0);\n"
                "}\n";
     }
     // FSR 3.1's output with the interface composited after it (exec.c post_process_ex): t0 = FSR's output, t1 = the image

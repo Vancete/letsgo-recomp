@@ -290,13 +290,6 @@ extern "C" bool dittosr_available(void) {
     return false;
 #endif
 }
-extern "C" float dittosr_exp_scale(void) {
-#ifdef DITTOSR
-    return dittosr::exp_scale();
-#else
-    return 1;
-#endif
-}
 extern "C" bool dittosr_dispatch(VkCommandBuffer cb, const Fsr3Dispatch *in) {
 #ifdef DITTOSR
     return dittosr::dispatch(cb, in);

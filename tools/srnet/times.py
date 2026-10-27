@@ -1,13 +1,13 @@
-"""The GPU time of Experiment 2's passes per run (LARECOMP_GPUPROF_AT logs): python times.py <log>...
+"""The GPU time of DittoSR's passes per run (LARECOMP_GPUPROF_AT logs): python times.py <log>...
 
-Per log, the median over the profiled frames (the first left out) of the rows "ours: GSR 2" (the convert pass, and
-x2_change.frag when the global reaction is on), "ours: GSR 2 upscale", "ours: GSR 2 sharpening, interface" (the final
-pass), their sum, and the scene's main pass (the same work in every run: a gauge of the GPU's clock)."""
+Per log, the median over the profiled frames (the first left out) of the rows "ours: DittoSR" (the convert pass and
+x2_change.frag), "ours: DittoSR upscale", "ours: DittoSR lines, interface" (the final pass), their sum, and the
+scene's main pass (the same work in every run: a gauge of the GPU's clock)."""
 import re
 import statistics
 import sys
 
-ROWS = ["ours: GSR 2", "ours: GSR 2 upscale", "ours: GSR 2 sharpening, interface"]
+ROWS = ["ours: DittoSR", "ours: DittoSR upscale", "ours: DittoSR lines, interface"]
 
 
 def parse(log):

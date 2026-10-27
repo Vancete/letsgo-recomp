@@ -561,42 +561,37 @@ void ui_page_graphics(float x, bool known) {
                 "Края теней: как рисует игра, сглаженные или ещё мягче."));
     ui_group_gap();
     // The upscaler: how the scene drawn at a lower resolution reaches the window (settings.h UPSCALE_*): bilinear;
-    // FSR 3.1 (temporal, the interface masked: exec.c, fsr3.cpp); Snapdragon GSR 2 (temporal, Qualcomm's: exec.c gsr2_run);
-    // on Android Snapdragon GSR 1 (in the present's draw: exec.c vk_present_draw); DittoSR (a local test upscaler,
-    // offered only where its data is - runtime/nvn/vulkan/fsr3.cpp dittosr_present). The temporal ones take a mode below.
+    // FSR 3.1 (temporal, the interface masked: exec.c, fsr3.cpp); DittoSR (temporal, our own: exec.c gsr2_run); DittoSR
+    // (FSR4) (a local test upscaler, offered only where its library and data are - runtime/nvn/vulkan/fsr3.cpp
+    // dittosr_present). The temporal ones take a mode below.
     {
         static int ditto = -1;
         if (ditto < 0) ditto = dittosr_present();
         const char *names[8];
         int ids[8], n = 0, cur = 0;
         names[n] = UI_T("Bilinear", "Bilinear", "Билинейное"), ids[n++] = UPSCALE_BILINEAR;
-#ifdef __ANDROID__
-        names[n] = "Snapdragon GSR", ids[n++] = UPSCALE_GSR;
-#endif
-        names[n] = "Snapdragon GSR 2", ids[n++] = UPSCALE_GSR2;
         names[n] = "FSR 3.1", ids[n++] = UPSCALE_FSR3;
-        if (ditto || g_settings.upscaler_pick == UPSCALE_DITTO) names[n] = "DittoSR", ids[n++] = UPSCALE_DITTO;
-        if (ditto || g_settings.upscaler_pick == UPSCALE_DITTO_EXP) names[n] = "DittoSR Experiment", ids[n++] = UPSCALE_DITTO_EXP;
-        names[n] = "DittoSR Experiment 2", ids[n++] = UPSCALE_DITTO_EXP2;  // (local experiment: GSR 2 based, no data needed)
-        names[n] = "Experiment 2 Net", ids[n++] = UPSCALE_X2_NET;  // (local experiment: Experiment 2 + our tiny network)
+        names[n] = "DittoSR", ids[n++] = UPSCALE_DITTOSR;
+        if (ditto) names[n] = "DittoSR (FSR4)", ids[n++] = UPSCALE_DITTO_FSR4;
+        names[n] = "DittoSR Net", ids[n++] = UPSCALE_DITTOSR_NET;  // (local experiment: DittoSR + our tiny network)
         for (int i = 0; i < n; i++) if (ids[i] == g_settings.upscaler_pick) cur = i;
         ui_row(l[8], x);
         if (ui_combo("##upscaler", &cur, names, n)) g_settings.upscaler_pick = ids[cur], settings_apply_levels();
         ui_tip(UI_T("How the scene, drawn below the screen's resolution, is brought up to it. Bilinear: plain. FSR 3.1 "
-                    "and Snapdragon GSR 2 (lighter): temporal, over several frames - they also smooth the edges, and draw "
-                    "the scene smaller by their mode. Snapdragon GSR (phones): sharper edges than bilinear for a small cost.",
+                    "and DittoSR (lighter): temporal, over several frames - they also smooth the edges, and draw the scene "
+                    "smaller by their mode.",
                     "Como a cena, desenhada abaixo da resolução da tela, é ampliada até ela. Bilinear: simples. FSR 3.1 "
-                    "e Snapdragon GSR 2 (mais leve): temporais, ao longo de vários quadros - também suavizam as bordas e "
-                    "desenham a cena menor conforme o modo. Snapdragon GSR (celulares): bordas mais nítidas que o bilinear, com custo pequeno.",
+                    "e DittoSR (mais leve): temporais, ao longo de vários quadros - também suavizam as bordas e desenham "
+                    "a cena menor conforme o modo.",
                     "Как сцена, нарисованная ниже разрешения экрана, увеличивается до него. Билинейное: простое. FSR 3.1 "
-                    "и Snapdragon GSR 2 (легче): временные, по нескольким кадрам - они же сглаживают края и рисуют "
-                    "сцену меньше по своему режиму. Snapdragon GSR (телефоны): края чётче билинейного при небольшой нагрузке."));
+                    "и DittoSR (легче): временные, по нескольким кадрам - они же сглаживают края и рисуют сцену меньше "
+                    "по своему режиму."));
     }
     // a temporal upscaler's mode: the render resolution is the window's divided by the ratio (runtime/nvn/output_scale.c),
-    // and its sharpening - RCAS, AMD's robust contrast-adaptive sharpening, inside FSR 3.1 / DittoSR, our own pass after
-    // GSR 2 (rcas.frag); the frame generation's in-between images take it too (exec.c post_process_ex)
+    // and its sharpening - RCAS, AMD's robust contrast-adaptive sharpening, inside FSR 3.1 / DittoSR (FSR4); DittoSR's
+    // line pass (x2_final.frag); the frame generation's in-between images take it too (exec.c post_process_ex)
     if (UPSCALE_TEMPORAL(g_settings.upscaler)) {
-        const char *name = UPSCALE_IS_GSR2(g_settings.upscaler) ? "GSR 2" : UPSCALE_IS_DITTO(g_settings.upscaler) ? "DittoSR" : "FSR 3.1";
+        const char *name = UPSCALE_IS_DITTOSR(g_settings.upscaler) || UPSCALE_IS_FSR4(g_settings.upscaler) ? "DittoSR" : "FSR 3.1";
         const char *pr[] = {UI_T("Native AA (1.0x)", "AA nativo (1,0x)", "Нативное AA (1,0x)"),
                             UI_T("Quality (1.5x)", "Qualidade (1,5x)", "Качество (1,5x)"),
                             UI_T("Balanced (1.7x)", "Equilibrado (1,7x)", "Баланс (1,7x)"),
@@ -609,40 +604,6 @@ void ui_page_graphics(float x, bool known) {
         ui_tip(UI_T("How much lower the scene is drawn before the upscaler brings it up: the window's size divided by the ratio. Higher ratios run faster and look softer.",
                     "Quanto menor a cena é desenhada antes de o ampliador a levar ao tamanho da tela: o tamanho da janela dividido pela razão. Razões maiores rodam mais rápido e ficam mais suaves.",
                     "Во сколько раз меньше рисуется сцена перед увеличением: размер окна, делённый на коэффициент. Больший коэффициент быстрее, но мягче."));
-        // (LOCAL experiment, DittoSR Experiment 2 / Net: its ghosting and settling options, each on its own - exec.c gsr2_run)
-        if (UPSCALE_IS_X2(g_settings.upscaler)) {
-            struct { const char *id, *label, *tip; bool *v; } o[] = {
-                {"##x2greact", UI_T("Fast settling", "Assentamento rápido", "Быстрое успокоение"),
-                 UI_T("When much of the image changes at once (a menu closing, a cut), the history gives way faster.",
-                      "Quando muito da imagem muda de uma vez (um menu fechando, um corte), o histórico cede mais rápido.",
-                      "Когда большая часть кадра меняется разом (закрытие меню, смена сцены), история уступает быстрее."),
-                 &g_settings.exp2_greact},
-                {"##x2drej", UI_T("Ghosting: depth", "Fantasmas: profundidade", "Шлейфы: глубина"),
-                 UI_T("Less history where the depth changed since the last frame: animated limbs, things uncovered.",
-                      "Menos histórico onde a profundidade mudou desde o último quadro: membros animados, o que foi descoberto.",
-                      "Меньше истории там, где глубина изменилась с прошлого кадра: анимированные части, открывшиеся места."),
-                 &g_settings.exp2_drej},
-                {"##x2dilate", UI_T("Ghosting: edge motion", "Fantasmas: movimento das bordas", "Шлейфы: движение краёв"),
-                 UI_T("Each pixel takes the motion of the nearest thing around it: no trail behind moving edges.",
-                      "Cada pixel toma o movimento do que está mais perto ao redor: sem rastro atrás de bordas em movimento.",
-                      "Каждый пиксель берёт движение ближайшего объекта рядом: без следа за движущимися краями."),
-                 &g_settings.exp2_dilate},
-                {"##x2vrej", UI_T("Ghosting: motion change", "Fantasmas: mudança de movimento", "Шлейфы: смена движения"),
-                 UI_T("Less history where the motion differs from the last frame's: another object is there now.",
-                      "Menos histórico onde o movimento difere do último quadro: agora há outro objeto ali.",
-                      "Меньше истории там, где движение отличается от прошлого кадра: там теперь другой объект."),
-                 &g_settings.exp2_vrej},
-                {"##x2minmax", UI_T("Ghosting: tight clamp", "Fantasmas: limite estreito", "Шлейфы: узкое ограничение"),
-                 UI_T("While moving, the history is held within the new samples' own range.",
-                      "Em movimento, o histórico fica dentro da faixa das novas amostras.",
-                      "В движении история ограничена диапазоном новых сэмплов."),
-                 &g_settings.exp2_minmax}};
-            for (int i = 0; i < 5; i++) {
-                ui_row(o[i].label, x);
-                ImGui::Checkbox(o[i].id, o[i].v);
-                ui_tip(o[i].tip);
-            }
-        }
         float pct = g_settings.fsr3_sharpness * 100;
         ui_row(l[7], x);
         if (ui_slider("##fsr3s", &pct, 0, 100, "%.0f%%", 5)) g_settings.fsr3_sharpness = pct / 100;

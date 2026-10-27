@@ -1,5 +1,5 @@
-"""Experiment 2's ghosting knobs against the 16-sample reference, on whole captured runs (model.py's port of the
-shaders, no network): python ghost.py <data folder> [runs...]
+"""DittoSR's ghosting knobs (one by one, as Experiment 2 had them) against the 16-sample reference, on whole captured
+runs (model.py's port of the shaders, no network): python ghost.py <data folder> [runs...]
 
 Per variant and ratio, over every frame from the 10th on:
   PSNR     of the final image (after the line pass)
@@ -16,8 +16,9 @@ import torch
 import model as M
 import train as T
 
-VARIANTS = [("x2", {}), ("greact", {"greact": 1}), ("drej", {"drej": 1}), ("dilate", {"dilate": 1}), ("vrej", {"vrej": 1}),
-            ("minmax", {"minmax": 1}), ("all", {"greact": 1, "drej": 1, "dilate": 1, "vrej": 1, "minmax": 1})]
+OFF = {"greact": 0, "drej": 0, "dilate": 0, "vrej": 0, "minmax": 0}
+VARIANTS = [("x2", OFF), ("greact", {**OFF, "greact": 1}), ("drej", {**OFF, "drej": 1}), ("dilate", {**OFF, "dilate": 1}),
+            ("vrej", {**OFF, "vrej": 1}), ("minmax", {**OFF, "minmax": 1}), ("dittosr", {})]
 LW = torch.tensor([0.299, 0.587, 0.114], device="cuda").view(1, 3, 1, 1)
 
 

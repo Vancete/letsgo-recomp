@@ -117,13 +117,13 @@ class TinyNet(nn.Module):
 
 
 class Upscaler(nn.Module):
-    """opts (Experiment 2's ghosting and settling knobs, LARECOMP_EXP2_*; 0 off): greact (the reaction to a large
-    change of the image), drej (the rejection by a changed depth), dilate (the nearest motion of the 3x3), vrej (the
-    rejection by a changed motion), minmax (the box within the samples' range in motion)."""
+    """opts (DittoSR's ghosting and settling, 1 on as the runtime's - built in there; 0 off): greact (the reaction to a
+    large change of the image), dilate (the nearest motion of the 3x3), vrej (the rejection by a changed motion), minmax
+    (the box within the samples' range in motion); drej (the rejection by a changed depth: tried, not taken - off)."""
     def __init__(self, use_net=True, opts=None):
         super().__init__()
         self.net = TinyNet() if use_net else None
-        self.opts = {"greact": 0.0, "drej": 0.0, "dilate": 0.0, "vrej": 0.0, "minmax": 0.0, **(opts or {})}
+        self.opts = {"greact": 1.0, "drej": 0.0, "dilate": 1.0, "vrej": 1.0, "minmax": 1.0, **(opts or {})}
         self.prev_mda = None
 
     def features(self, color, clip, mv, hist, state, os_):
