@@ -562,8 +562,8 @@ void ui_page_graphics(float x, bool known) {
     ui_group_gap();
     // The upscaler: how the scene drawn at a lower resolution reaches the window (settings.h UPSCALE_*): bilinear;
     // FSR 3.1 (temporal, the interface masked: exec.c, fsr3.cpp); DittoSR (temporal, our own: exec.c gsr2_run); DittoSR
-    // (FSR4) (a local test upscaler, offered only where its library and data are - runtime/nvn/vulkan/fsr3.cpp
-    // dittosr_present). The temporal ones take a mode below.
+    // (FSR4) and DittoSR Experiment (local test upscalers, offered only where their library and data are -
+    // runtime/nvn/vulkan/fsr3.cpp dittosr_present). The temporal ones take a mode below.
     {
         static int ditto = -1;
         if (ditto < 0) ditto = dittosr_present();
@@ -573,6 +573,7 @@ void ui_page_graphics(float x, bool known) {
         names[n] = "FSR 3.1", ids[n++] = UPSCALE_FSR3;
         names[n] = "DittoSR", ids[n++] = UPSCALE_DITTOSR;
         if (ditto) names[n] = "DittoSR (FSR4)", ids[n++] = UPSCALE_DITTO_FSR4;
+        if (ditto) names[n] = "DittoSR Experiment", ids[n++] = UPSCALE_DITTO_EXP;
         names[n] = "DittoSR Net", ids[n++] = UPSCALE_DITTOSR_NET;  // (local experiment: DittoSR + our tiny network)
         for (int i = 0; i < n; i++) if (ids[i] == g_settings.upscaler_pick) cur = i;
         ui_row(l[8], x);

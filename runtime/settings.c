@@ -130,12 +130,12 @@ static void parse_line(const char *line) {
     }
     // (after "aa" in the file; older files' FSR 1: bilinear. Files of the versions with FSR 3.1 / GSR 2 / DittoSR as
     // anti-aliasing choices have "aa = fsr3" and the like and then "upscaler = bilinear" or "gsr": the "aa" one stands.
-    // Older names: "gsr2" and "dittosr_exp2" (Snapdragon GSR 2, DittoSR Experiment 2) are DittoSR now, "dittosr_exp"
-    // DittoSR (FSR4), "gsr" (Snapdragon GSR 1) bilinear)
+    // Older names: "gsr2" and "dittosr_exp2" (Snapdragon GSR 2, DittoSR Experiment 2) are DittoSR now, "gsr" (Snapdragon
+    // GSR 1) bilinear)
     else if (!strcmp(key, "upscaler")) {
         int u = !strcmp(val, "fsr3") ? UPSCALE_FSR3 :
                 !strcmp(val, "dittosr") || !strcmp(val, "gsr2") || !strcmp(val, "dittosr_exp2") ? UPSCALE_DITTOSR :
-                !strcmp(val, "dittosr_fsr4") || !strcmp(val, "dittosr_exp") ? UPSCALE_DITTO_FSR4 :
+                !strcmp(val, "dittosr_fsr4") ? UPSCALE_DITTO_FSR4 : !strcmp(val, "dittosr_exp") ? UPSCALE_DITTO_EXP :
                 !strcmp(val, "x2net") ? UPSCALE_DITTOSR_NET : UPSCALE_BILINEAR;
         if (!aa_upscaled || UPSCALE_TEMPORAL(u)) g_settings.upscaler_pick = u;
     }
@@ -294,7 +294,7 @@ void settings_save(void) {
     fprintf(f, "smaa = %d\n", g_settings.antialias != AA_OFF);
     fprintf(f, "aa = %s\n", g_settings.antialias == AA_TAA ? "taa" : g_settings.antialias == AA_SMAA ? "smaa" : "off");
     // (an older version reads "fsr3" here as FSR 3.1, the others as bilinear)
-    static const char *const ups[] = {"bilinear", "bilinear", "bilinear", "fsr3", "bilinear", "bilinear", "dittosr_fsr4", "bilinear",
+    static const char *const ups[] = {"bilinear", "bilinear", "bilinear", "fsr3", "bilinear", "bilinear", "dittosr_fsr4", "dittosr_exp",
                                       "dittosr", "x2net"};
     int up = g_settings.upscaler_pick;
     fprintf(f, "upscaler = %s\n", ups[up >= 0 && up <= UPSCALE_DITTOSR_NET ? up : 0]);
