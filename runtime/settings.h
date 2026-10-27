@@ -78,7 +78,8 @@ typedef struct {
     int fsr3_preset;      // FSR3_*: with a temporal upscaler, the render resolution (default FSR3_QUALITY)
     // (LOCAL experiment, DittoSR Experiment 2 / Net: its ghosting and settling options, graphics page under the mode -
     // exec.c gsr2_run: the reaction to a large change of the image, the rejection by a changed depth, the nearest
-    // motion of the 3x3, the rejection by a changed motion, the box within the samples' range in motion; default off)
+    // motion of the 3x3, the rejection by a changed motion, the box within the samples' range in motion; default on but
+    // the depth rejection)
     bool exp2_greact, exp2_drej, exp2_dilate, exp2_vrej, exp2_minmax;
     int frame_gen;        // frame generation: 0 off, FG_AUTO, 2 / 3 / 4 images per world frame (exec.c frame interpolation, any GPU)
     int fg_method;        // FG_RERENDER / FG_FLOW: how its in-between images are made (F12 advanced tab; live)

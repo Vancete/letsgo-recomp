@@ -45,6 +45,11 @@ Settings g_settings = {
     .taa_sharpness = 0.5f,
     .fsr3_sharpness = 0.5f,
     .fsr3_preset = FSR3_QUALITY,
+    // (Experiment 2's options: all but the depth rejection - the player's choice after trying them)
+    .exp2_greact = true,
+    .exp2_dilate = true,
+    .exp2_vrej = true,
+    .exp2_minmax = true,
     .gi = false,
     .gi_intensity = 2.0f,
     .gi_radius = 300.0f,
