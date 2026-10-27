@@ -16,11 +16,13 @@ enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25
 // temporal, it anti-aliases too (AMD FidelityFX, runtime/nvn/vulkan/fsr3.cpp), FSR 1 when its library is missing;
 // DITTOSR: DittoSR, temporal, our own passes on Snapdragon GSR 2's convert pass (exec.c gsr2_run: gsr2_* names the
 // path it grew from); DITTO_FSR4: DittoSR (FSR4), a local test upscaler with FSR 3.1's inputs, offered only where its
-// library and data are (runtime/nvn/vulkan/fsr3.cpp dittosr_*), FSR 1 without them. (4, 5, 7: Snapdragon GSR 1 / 2 and
-// DittoSR Experiment, removed)
-enum { UPSCALE_BILINEAR = 0, UPSCALE_FSR1 = 2 /* AMD FSR 1 */, UPSCALE_FSR3 = 3, UPSCALE_DITTO_FSR4 = 6, UPSCALE_DITTOSR = 8 };
+// library and data are (runtime/nvn/vulkan/fsr3.cpp dittosr_*), FSR 1 without them; DITTO_EXP: DittoSR Experiment, its
+// cheaper variant with the same library (at a smaller output, then EASU and a line pass: exec.c dittosr_exp_mid).
+// (4, 5: Snapdragon GSR 1 / 2, removed)
+enum { UPSCALE_BILINEAR = 0, UPSCALE_FSR1 = 2 /* AMD FSR 1 */, UPSCALE_FSR3 = 3, UPSCALE_DITTO_FSR4 = 6,
+       UPSCALE_DITTO_EXP = 7 /* (local experiment: DittoSR (FSR4)'s cheaper variants, ditto_sr.h) */, UPSCALE_DITTOSR = 8 };
 #define UPSCALE_IS_DITTOSR(u) ((u) == UPSCALE_DITTOSR)
-#define UPSCALE_IS_FSR4(u) ((u) == UPSCALE_DITTO_FSR4)
+#define UPSCALE_IS_FSR4(u) ((u) == UPSCALE_DITTO_FSR4 || (u) == UPSCALE_DITTO_EXP)
 // the temporal upscalers: they anti-alias the image themselves (the anti-aliasing setting is set aside) and take a mode
 // (fsr3_preset) for the render resolution
 #define UPSCALE_TEMPORAL(u) ((u) == UPSCALE_FSR3 || UPSCALE_IS_DITTOSR(u) || UPSCALE_IS_FSR4(u))
@@ -45,7 +47,7 @@ typedef struct {
     int res_height;      // the launcher's render height in lines (720 / 1080 / 1440 / 2160); 0: res_mode decides
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (upscaler_pick where this
                          // platform has it, else bilinear: settings_apply_levels)
-    int upscaler_pick;   // the Graphics tab's Upscaler: UPSCALE_BILINEAR, _FSR3, _DITTOSR or _DITTO_FSR4
+    int upscaler_pick;   // the Graphics tab's Upscaler: UPSCALE_BILINEAR, _FSR3, _DITTOSR, _DITTO_FSR4 or _DITTO_EXP
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window (not with a temporal
                          // upscaler: AA_ON)
     float volume;        // master volume, 1 = 100%
