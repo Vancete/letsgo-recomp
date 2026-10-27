@@ -6206,6 +6206,8 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
             // (its compute writes: the next post pass's barrier, or the end's, waits for them)
             v = post_view(out), rb_ = out;
             fsr3_engaged = true, fsr3_rw = b->width, fsr3_rh = b->height, fsr3_ow = ow;
+            // (LOCAL research: the teacher's pairs at the window's size - DittoSR Experiment at a scale of 1)
+            if (expcap_dir() && dr && UPSCALE_IS_FSR4(g_settings.upscaler)) expcap_run(cb, out, in, dr, mv, mt, ow, oh);
             // The interface after the upscale: FSR 3.1 rebuilds the image as the jittered scene's, the interface too (it is
             // drawn into the same image, not jittered) - with the mask as its transparency and composition one it takes
             // little history there, but each frame's interface lands where that frame's jitter puts it: at 4K (Quality,
