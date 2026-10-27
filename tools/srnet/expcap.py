@@ -16,10 +16,11 @@ class ExpFrames:
     def __init__(self, path):
         with open(path, "rb") as f:
             hdr = f.read(64)
-        if hdr[:4] != b"EXP1":
-            raise ValueError(f"{path}: not a teacher capture")
         self.path = path
         self.size = os.path.getsize(path)
+        if len(hdr) < 64 or hdr[:4] != b"EXP1":  # (cut short as the game exited: complete() says no)
+            self.end, self.lr = 1 << 62, {}
+            return
         _, self.ow, self.oh, rw, rh = struct.unpack_from("<5I", hdr, 4)
         jit = struct.unpack_from("<2f", hdr, 24)
         self.proj = struct.unpack_from("<4f", hdr, 32)

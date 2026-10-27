@@ -99,14 +99,15 @@ def smoothstep(a, b, x):
 
 
 class TinyNet(nn.Module):
-    """The network: 10 inputs at the render size -> 5 corrections + 2 state channels. ~3.9k parameters."""
+    """The network: 10 inputs at the render size -> 5 corrections + 2 state channels (+ res: a detail residual, the
+    output's r x r pixels per render pixel - LOCAL research, the teacher's students). ~3.9k parameters at hid 16."""
     IN, HID, OUT, STATE = 10, 16, 5, 2
 
-    def __init__(self):
+    def __init__(self, hid=16, res=0):
         super().__init__()
-        self.c1 = nn.Conv2d(self.IN, self.HID, 3, padding=1)
-        self.c2 = nn.Conv2d(self.HID, self.HID, 3, padding=1)
-        self.c3 = nn.Conv2d(self.HID, self.OUT + self.STATE, 1)
+        self.c1 = nn.Conv2d(self.IN, hid, 3, padding=1)
+        self.c2 = nn.Conv2d(hid, hid, 3, padding=1)
+        self.c3 = nn.Conv2d(hid, self.OUT + self.STATE + res, 1)
         nn.init.zeros_(self.c3.weight)
         nn.init.zeros_(self.c3.bias)
 
@@ -120,9 +121,10 @@ class Upscaler(nn.Module):
     """opts (DittoSR's ghosting and settling, 1 on as the runtime's - built in there; 0 off): greact (the reaction to a
     large change of the image), dilate (the nearest motion of the 3x3), vrej (the rejection by a changed motion), minmax
     (the box within the samples' range in motion); drej (the rejection by a changed depth: tried, not taken - off)."""
-    def __init__(self, use_net=True, opts=None):
+    def __init__(self, use_net=True, opts=None, hid=16, res_ratio=0):
         super().__init__()
-        self.net = TinyNet() if use_net else None
+        self.res_ratio = res_ratio  # (a detail residual added to the final image: res_ratio^2 x 3 channels, pixel-shuffled)
+        self.net = TinyNet(hid, 3 * res_ratio * res_ratio) if use_net else None
         self.opts = {"greact": 1.0, "drej": 0.0, "dilate": 1.0, "vrej": 1.0, "minmax": 1.0, **(opts or {})}
         self.prev_mda = None
 
@@ -167,7 +169,8 @@ class Upscaler(nn.Module):
         if self.net is not None:
             o = self.net(self.features(color, clip, mv, hist, state, (W, H)))
             corr = 2.0 * torch.tanh(0.5 * o[:, :TinyNet.OUT])
-            new_state = torch.tanh(o[:, TinyNet.OUT:])
+            new_state = torch.tanh(o[:, TinyNet.OUT:TinyNet.OUT + TinyNet.STATE])
+            resid = F.pixel_shuffle(o[:, TinyNet.OUT + TinyNet.STATE:], self.res_ratio) if self.res_ratio else None
         # the output pixels' uv and render coordinates
         ys = (torch.arange(H, device=dev, dtype=dt) + 0.5) / H
         xs = (torch.arange(W, device=dev, dtype=dt) + 0.5) / W
@@ -289,6 +292,8 @@ class Upscaler(nn.Module):
         # the line pass (x2_final.frag)
         s = torch.exp(line_c) if corr is not None else 1.0
         final = line_pass(out, s)
+        if corr is not None and self.res_ratio:
+            final = (final + resid).clamp(0, 1)
         return out, final, new_state
 
 
