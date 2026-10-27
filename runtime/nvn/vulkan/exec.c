@@ -5740,11 +5740,14 @@ static const char *srcap_dir(void) {
     if (d == (const char *)1) d = getenv("LARECOMP_SRCAP");
     return d;
 }
+// (the captures' ring: a slot recorded three frames ago is done - or waited for - and handed to a writer thread, which
+// writes it as <cap_dir>/f<present>.bin)
 typedef struct { uint8_t *data; size_t size; uint64_t present; } SrcapJob;
 static SrcapJob srcap_q[64];
 static int srcap_qn;
 static pthread_mutex_t srcap_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t srcap_cv = PTHREAD_COND_INITIALIZER;
+static const char *cap_dir;
 static void *srcap_writer(void *arg) {
     (void)arg;
     for (;;) {
@@ -5755,7 +5758,7 @@ static void *srcap_writer(void *arg) {
         pthread_cond_broadcast(&srcap_cv);
         pthread_mutex_unlock(&srcap_mu);
         char path[1024];
-        snprintf(path, sizeof path, "%s/f%06llu.bin", srcap_dir(), (unsigned long long)j.present);
+        snprintf(path, sizeof path, "%s/f%06llu.bin", cap_dir, (unsigned long long)j.present);
         FILE *f = fopen(path, "wb");
         if (f) { fwrite(j.data, 1, j.size, f); fclose(f); }
         else LOG("[srcap] %s: cannot write\n", path);
@@ -5763,34 +5766,68 @@ static void *srcap_writer(void *arg) {
     }
     return NULL;
 }
-static void srcap_run(VkCommandBuffer cb, TexBackend *b, TexBackend *mv, TexBackend *mask, uint32_t ow, uint32_t oh) {
+enum { CAP_RING = 3 };
+static struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t cap, seq, present; size_t size; bool full; } cap_ring[CAP_RING];
+static int cap_slot;
+// The ring's slots handed to the writer: the one about to be reused, or all of them once the capture is over (done);
+// from / to: LARECOMP_SRCAP_FROM / _TO (presents), the writer started the first time. False: not a frame to capture.
+static bool cap_begin(const char *dir, uint64_t present) {
     static long from = -2, to;
     if (from == -2) {
         from = getenv("LARECOMP_SRCAP_FROM") ? atol(getenv("LARECOMP_SRCAP_FROM")) : 0;
         to = getenv("LARECOMP_SRCAP_TO") ? atol(getenv("LARECOMP_SRCAP_TO")) : 1L << 30;
+        cap_dir = dir;
         pthread_t t;
         pthread_create(&t, NULL, srcap_writer, NULL);
         pthread_detach(t);
     }
-    // the ring: a slot recorded three frames ago is done (or waited for), handed to the writer
-    enum { RING = 3 };
-    static struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t cap, seq, present; size_t size; bool full; } ring[RING];
-    static int slot;
-    uint64_t pc_ = renderer_present_count();
-    bool done = (long)pc_ > to;  // (past the last: whatever is left)
-    for (int i = 0; i < RING; i++) {
-        if (!ring[i].full || (i != slot && !done)) continue;
-        vk_wait_seq(ring[i].seq);
-        uint8_t *copy = malloc(ring[i].size);
-        memcpy(copy, ring[i].ptr, ring[i].size);
+    bool done = (long)present > to;  // (past the last: whatever is left)
+    for (int i = 0; i < CAP_RING; i++) {
+        if (!cap_ring[i].full || (i != cap_slot && !done)) continue;
+        vk_wait_seq(cap_ring[i].seq);
+        uint8_t *copy = malloc(cap_ring[i].size);
+        memcpy(copy, cap_ring[i].ptr, cap_ring[i].size);
         pthread_mutex_lock(&srcap_mu);
         while (srcap_qn >= 64) pthread_cond_wait(&srcap_cv, &srcap_mu);  // (the disk behind: the game waits)
-        srcap_q[srcap_qn++] = (SrcapJob){copy, ring[i].size, ring[i].present};
+        srcap_q[srcap_qn++] = (SrcapJob){copy, cap_ring[i].size, cap_ring[i].present};
         pthread_cond_broadcast(&srcap_cv);
         pthread_mutex_unlock(&srcap_mu);
-        ring[i].full = false;
+        cap_ring[i].full = false;
     }
-    if ((long)pc_ < from || (long)pc_ > to) return;
+    return (long)present >= from && (long)present <= to;
+}
+// The header (64 bytes) and the images (n, each w x h x bpp bytes, in that order) copied into this frame's slot.
+static size_t cap_record(VkCommandBuffer cb, const uint8_t *hdr, TexBackend **img, const uint32_t *iw, const uint32_t *ih,
+                         const uint32_t *bpp, int n, uint64_t present) {
+    size_t size = 64;
+    for (int i = 0; i < n; i++) size += (size_t)iw[i] * ih[i] * bpp[i];
+    int s = cap_slot;
+    if (cap_ring[s].cap < size) {
+        if (cap_ring[s].buf) { vk_wait_seq(cap_ring[s].seq); vmaDestroyBuffer(g_vk.vma, cap_ring[s].buf, cap_ring[s].mem); }
+        cap_ring[s].cap = size;
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info;
+        VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &cap_ring[s].buf, &cap_ring[s].mem, &info));
+        cap_ring[s].ptr = info.pMappedData;
+    }
+    memcpy(cap_ring[s].ptr, hdr, 64);
+    vk_full_barrier(cb);
+    size_t off = 64;
+    for (int i = 0; i < n; i++) {
+        VkBufferImageCopy c = {.bufferOffset = off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {iw[i], ih[i], 1}};
+        vkCmdCopyImageToBuffer(cb, img[i]->image, VK_IMAGE_LAYOUT_GENERAL, cap_ring[s].buf, 1, &c);
+        off += (size_t)iw[i] * ih[i] * bpp[i];
+    }
+    vk_full_barrier(cb);
+    cap_ring[s].seq = vk_pending_seq(), cap_ring[s].present = present, cap_ring[s].size = size, cap_ring[s].full = true;
+    cap_slot = (cap_slot + 1) % CAP_RING;
+    return size;
+}
+static void srcap_run(VkCommandBuffer cb, TexBackend *b, TexBackend *mv, TexBackend *mask, uint32_t ow, uint32_t oh) {
+    uint64_t pc_ = renderer_present_count();
+    if (!cap_begin(srcap_dir(), pc_)) return;
     uint32_t k = b->width / ow;
     if (k < 2 || b->width != ow * k || b->height != oh * k) {
         static bool warned;
@@ -5839,31 +5876,50 @@ static void srcap_run(VkCommandBuffer cb, TexBackend *b, TexBackend *mv, TexBack
             float pm[8] = {(float)m, (float)b->width / (float)iw[1 + 3 * r], jit[r][0], jit[r][1], hm};
             post_pass_view(cb, pipes[m], src, 4, post_view(img[m + 3 * r]), iw[1 + 3 * r], ih[1 + 3 * r], pm, 32, false, false);
         }
-    vk_full_barrier(cb);
-    size_t size = sizeof hdr;
-    for (int i = 0; i < 7; i++) size += (size_t)iw[i] * ih[i] * bpp[i];
-    if (ring[slot].cap < size) {
-        if (ring[slot].buf) { vk_wait_seq(ring[slot].seq); vmaDestroyBuffer(g_vk.vma, ring[slot].buf, ring[slot].mem); }
-        ring[slot].cap = size;
-        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
-        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
-                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
-        VmaAllocationInfo info;
-        VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &ring[slot].buf, &ring[slot].mem, &info));
-        ring[slot].ptr = info.pMappedData;
-    }
-    memcpy(ring[slot].ptr, hdr, sizeof hdr);
-    size_t off = sizeof hdr;
-    for (int i = 0; i < 7; i++) {
-        VkBufferImageCopy c = {.bufferOffset = off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {iw[i], ih[i], 1}};
-        vkCmdCopyImageToBuffer(cb, img[i]->image, VK_IMAGE_LAYOUT_GENERAL, ring[slot].buf, 1, &c);
-        off += (size_t)iw[i] * ih[i] * bpp[i];
-    }
-    vk_full_barrier(cb);
-    ring[slot].seq = vk_pending_seq(), ring[slot].present = pc_, ring[slot].size = size, ring[slot].full = true;
-    slot = (slot + 1) % RING;
+    size_t size = cap_record(cb, hdr, img, iw, ih, bpp, 7, pc_);
     static bool logged;
     if (!logged) logged = true, LOG("[srcap] %ux%u -> %ux%u, %zu bytes a frame into %s\n", b->width, b->height, ow, oh, size, srcap_dir());
+}
+// ---- LOCAL research: DittoSR Experiment as a teacher (tools/srnet, local only - never committed data or weights).
+// LARECOMP_EXPCAP=<folder>, the game played with upscaler = dittosr_exp: each real frame (LARECOMP_SRCAP_FROM / _TO) ->
+// <folder>/f<present>.bin - its inputs at the render size as the game drew them (colour with the interface mask in
+// alpha, depth R32F, motion vectors RG16F, the frame's jitter) and its output at the window's size (after its line pass,
+// before the interface composite). File: "EXP1", u32 present, ow, oh, rw, rh, f32 jitter x, y, proj[4]; then the planes:
+// the output RGBA8, the colour RGBA8, depth R32F, motion RG16F.
+static const char *expcap_dir(void) {
+    static const char *d = (const char *)1;
+    if (d == (const char *)1) d = getenv("LARECOMP_EXPCAP");
+    return d;
+}
+static void expcap_run(VkCommandBuffer cb, TexBackend *teacher, TexBackend *in, TexBackend *depth, TexBackend *mv, TexBackend *mask,
+                       uint32_t ow, uint32_t oh) {
+    uint64_t pc_ = renderer_present_count();
+    if (!cap_begin(expcap_dir(), pc_)) return;
+    uint32_t rw = in->width, rh = in->height;
+    static const char *fs = "srcap.frag";
+    // (srcap.frag at a scale of 1 and no jitter: a copy into a known format; slots 54-57, srcap_run's)
+    TexBackend *img[4] = {post_image(54, ow, oh), post_image(55, rw, rh), post_image_fmt(56, rw, rh, VK_FORMAT_R32_SFLOAT),
+                          post_image_fmt(57, rw, rh, VK_FORMAT_R16G16_SFLOAT)};
+    uint32_t iw[4] = {ow, rw, rw, rw}, ih[4] = {oh, rh, rh, rh}, bpp[4] = {4, 4, 4, 4};
+    VkFormat fmts[4] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R16G16_SFLOAT};
+    float hm = mask ? 1.0f : 0.0f;
+    VkImageView ts[4] = {post_view(teacher), post_view(depth), post_view(mv), raw_view(teacher)};
+    float p1[8] = {1, 1, 0, 0, 0};
+    post_pass_view(cb, post_pipeline_ex(fs, fmts[0], 0), ts, 4, post_view(img[0]), ow, oh, p1, 32, false, false);
+    VkImageView src[4] = {raw_view(in), post_view(depth), post_view(mv), mask ? post_view(mask) : raw_view(in)};
+    for (int m = 1; m <= 3; m++) {
+        float pm[8] = {(float)m, 1, 0, 0, hm};
+        post_pass_view(cb, post_pipeline_ex(fs, fmts[m], 0), src, 4, post_view(img[m]), rw, rh, pm, 32, false, false);
+    }
+    uint8_t hdr[64] = {0};
+    memcpy(hdr, "EXP1", 4);
+    uint32_t h32[5] = {(uint32_t)pc_, ow, oh, rw, rh};
+    memcpy(hdr + 4, h32, 20);
+    memcpy(hdr + 24, &taa_jit[2], 8);
+    memcpy(hdr + 32, ao.proj, 16);
+    size_t size = cap_record(cb, hdr, img, iw, ih, bpp, 4, pc_);
+    static bool logged;
+    if (!logged) logged = true, LOG("[expcap] %ux%u -> %ux%u, %zu bytes a frame into %s\n", rw, rh, ow, oh, size, expcap_dir());
 }
 
 static TexBackend *hold_copy_into(TexBackend *d, TexBackend *src);
@@ -6122,6 +6178,7 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
             VkImageView ri_[3] = {post_view(e)};
             post_pass(cb, ld > 0 ? "ditto_line.frag" : "rcas.frag", ri_, 1, r, pr, false);
             v = post_view(r), rb_ = r;
+            if (expcap_dir() && dr) expcap_run(cb, r, in, dr, mv, mt, ow, oh);  // (LOCAL research: the teacher's pairs)
             static int uic = -1;
             if (uic < 0) uic = getenv("LARECOMP_FSR3_UI_COMPOSITE") ? atoi(getenv("LARECOMP_FSR3_UI_COMPOSITE")) : 1;
             if (uic && mt) {

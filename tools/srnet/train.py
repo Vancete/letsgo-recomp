@@ -19,6 +19,7 @@ import time
 import numpy as np
 import torch
 
+import expcap
 import model as M
 import srcap
 
@@ -76,7 +77,10 @@ def load_runs(root, names):
     seqs = []
     for n in names:
         for s in srcap.list_frames(os.path.join(root, n)):
-            fs = [Frames(p) for p in s]
+            # (the 16-sample captures, or the teacher's - expcap.py: DittoSR Experiment's output as the target, local only)
+            with open(s[0], "rb") as f:
+                kind = expcap.ExpFrames if f.read(4) == b"EXP1" else Frames
+            fs = [kind(p) for p in s]
             fs = [f for f in fs if f.complete()]  # (the last one of a run can be cut short: the game exited)
             if fs:
                 seqs.append(fs)
@@ -87,7 +91,7 @@ def batch(seqs, ratio, n, length, crop=CROP, dev="cuda", whole=False):
     """n crops of `length` consecutive frames: tensors per frame (colour, depth, motion, jitter, reference, mask)."""
     out = []
     for _ in range(n):
-        s = random.choice([s for s in seqs if len(s) >= length])
+        s = random.choice([s for s in seqs if len(s) >= length and ratio in s[0].lr])
         t0 = random.randrange(len(s) - length + 1)
         f0 = s[t0]
         if whole:
@@ -196,7 +200,7 @@ def evaluate(net, seqs, ratio, frames=24, dev="cuda"):
     """The whole first validation sequence (frames 30..30+frames, the history built over 30 before): PSNR of the final
     image, and the temporal error (frame-to-frame change along the motion beyond the reference's)."""
     net.eval()
-    s = seqs[0]
+    s = [s for s in seqs if ratio in s[0].lr][0]
     fr, meta = batch([s[:30 + frames]], ratio, 1, 30 + frames, dev=dev, whole=True)
     with torch.no_grad():
         finals, parts = run_seq(net, fr, meta, 30)
@@ -224,8 +228,9 @@ def main():
     net = M.Upscaler(use_net=True).to(dev)
     base = M.Upscaler(use_net=False).to(dev)
     print(f"parameters: {sum(p.numel() for p in net.parameters())}")
-    for r in (2, 3):
-        print(f"Experiment 2 alone at {r}x: PSNR %.2f, Charbonnier %.4f, temporal %.4f" % evaluate(base, val, r))
+    ratios = sorted({r for s in seqs for r in s[0].lr})
+    for r in ratios:
+        print(f"DittoSR alone at {r}x: PSNR %.2f, Charbonnier %.4f, temporal %.4f" % evaluate(base, val, r))
     opt = torch.optim.Adam(net.parameters(), lr=a.lr)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, a.lr, total_steps=a.steps, pct_start=0.05)
     t0 = time.time()
@@ -235,7 +240,7 @@ def main():
 
     def reader():
         for step in range(1, a.steps + 1):
-            q.put(batch(seqs, 2 + (step & 1), BATCH, WARM + TRAIN, dev=dev))
+            q.put(batch(seqs, ratios[step % len(ratios)], BATCH, WARM + TRAIN, dev=dev))
 
     threading.Thread(target=reader, daemon=True).start()
     for step in range(1, a.steps + 1):
@@ -253,7 +258,7 @@ def main():
             run.zero_()
             print(f"step {step}: charb {r[0]:.4f} detail {r[1]:.4f} temporal {r[2]:.4f}  ({time.time() - t0:.0f} s)", flush=True)
         if step % 1000 == 0 or step == a.steps:
-            for rr in (2, 3):
+            for rr in ratios:
                 print(f"  val {rr}x: PSNR %.2f, Charbonnier %.4f, temporal %.4f" % evaluate(net, val, rr), flush=True)
             torch.save(net.net.state_dict(), a.out)
 
