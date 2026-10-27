@@ -168,10 +168,9 @@ follows the load, so timestamps there can't show it).
 
 Our own post-processing was ~23% of a 1080p frame: debanding is off on Android (~12% of the frame; `LARECOMP_DEBAND=1`
 turns it on), and the colour grade is applied in the present's own draw when it is the last step (one full-size pass
-less). With SMAA the post is now ~0.38 of a main pass (was 0.85); without it, nothing. The Graphics tab's *Upscaler*
-(without FSR 3.1) can be Snapdragon GSR 1 (Qualcomm's Game Super Resolution, third_party/snapdragon-gsr, BSD 3-Clause):
-one pass in the present's draw, ~0.3 ms a frame at the phone's 2133x1200 - 720p with GSR instead of rendering at 1080p
-halves the main pass. Next levers: half precision in the materials (their ~44 texture reads keep occupancy at 15%);
+less). With SMAA the post is now ~0.38 of a main pass (was 0.85); without it, nothing. (Snapdragon GSR 1, one pass in
+the present's draw at ~0.3 ms a frame at the phone's 2133x1200, was the Graphics tab's phone upscaler until it was
+removed with GSR 2: DittoSR took their place.) Next levers: half precision in the materials (their ~44 texture reads keep occupancy at 15%);
 the game's 60 fps mode; clear-only passes as the next pass's load (~5%).
 
 ## Temporal upscalers on a phone
@@ -185,7 +184,7 @@ the motion vectors and the interface mask (exec.c post_process_ex). Measured on 
 | SMAA, 1067x600, bilinear | 18.1 ms | - |
 | SMAA, 1280x720, bilinear | 20.9 ms | - |
 | FSR 3.1 Performance | 22.3 ms | ~4 - 5 ms |
-| Snapdragon GSR 2 Performance | 21.6 ms | 3.4 ms |
+| Snapdragon GSR 2 Performance (since replaced by DittoSR) | 21.6 ms | 3.4 ms |
 
 - **FSR 3.1**: the FidelityFX SDK 1.1.4 (MIT) built for arm64 by `make ffx-android` (tools/build_ffx_android.sh: a
   sparse clone of the pinned release, tools/ffx_android/patch_sdk.py for what it takes from MSVC and Windows, the passes'
@@ -193,9 +192,11 @@ the motion vectors and the interface mask (exec.c post_process_ex). Measured on 
   `shaderFloat16`); the Adreno reports 64-wide waves only, so no wave64 variants. On a tiler its compute passes'
   timestamps don't split the time between them (the last pass's row takes ~9 ms of work done before it), so the cost
   above is the frame against SMAA at the same render size.
-- **Snapdragon GSR 2** (Qualcomm, BSD 3-Clause; `upscaler = gsr2`): its 2-pass fragment variant (shaders.c gsr2_*.frag), the
-  upscale in half precision as Qualcomm's - in full precision it took 2.5 ms instead of 1.45 - with a 10-bit history
-  (gsr2_run), then our RCAS and the interface composite in one pass (two passes: 1 ms each).
+- **Snapdragon GSR 2** (Qualcomm, BSD 3-Clause), as it was measured here: its 2-pass fragment variant, the upscale in
+  half precision as Qualcomm's - in full precision it took 2.5 ms instead of 1.45 - with a 10-bit history, then our RCAS
+  and the interface composite in one pass (two passes: 1 ms each). It was removed from the Upscaler setting; **DittoSR**
+  (`upscaler = dittosr`, older files' `gsr2` load as it) keeps its convert pass (shaders.c gsr2_convert.frag) and the
+  10-bit history (exec.c gsr2_run) with an upscale and a line pass of our own (x2_upscale.frag, x2_final.frag).
 - With frame generation (re-rendering, 2x) both hold 60 images a second, the game at 30: the in-between images are
   resolved against frame N's upscaled output (side_resolve.frag), the upscaler's history goes on with the real frames.
 

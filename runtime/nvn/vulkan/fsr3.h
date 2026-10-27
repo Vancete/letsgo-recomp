@@ -11,7 +11,7 @@ typedef struct {
     float mv_scale_x, mv_scale_y;            // the motion vectors to pixels, previous - current
     float near_, far_, fov_y, meters_per_unit, frame_ms, sharpness;
     bool reset;                              // no history (a cut, the first frame)
-    bool exp;                                // (LOCAL experiment: DittoSR Experiment's variant)
+    bool exp;                                // (always false: DittoSR Experiment's variant, removed - ditto_sr.h reads it)
 } Fsr3Dispatch;
 
 bool fsr3_available(void);
@@ -22,12 +22,10 @@ bool fsr3_dispatch(VkCommandBuffer cb, const Fsr3Dispatch *d);
 void fsr3_shutdown(void);
 // OptiScaler is injected (winmm.dll next to the exe, or LARECOMP_FSR3_OPTISCALER=1) and takes the FFX calls - fsr3.cpp
 bool fsr3_optiscaler(void);
-// DittoSR (aa = dittosr), a local test upscaler with FSR 3.1's inputs: its library and data are not part of the repository.
+// DittoSR (FSR4) (upscaler = dittosr_fsr4), a local test upscaler with FSR 3.1's inputs: its library and data are not part
+// of the repository.
 // present: its data is there (no GPU work); available: ready on the GPU; dispatch: as fsr3_dispatch
 bool dittosr_present(void);
 bool dittosr_available(void);
 bool dittosr_dispatch(VkCommandBuffer cb, const Fsr3Dispatch *d);
-// (LOCAL experiment, DittoSR Experiment: its output's scale of the window's sides; and DittoSR into an image of that
-// size - d's output sizes set to it, *out (exec.c's TexBackend) the image)
-float dittosr_exp_scale(void);
 

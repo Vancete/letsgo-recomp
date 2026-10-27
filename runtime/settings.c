@@ -129,10 +129,14 @@ static void parse_line(const char *line) {
                               (n >= 1 && n <= 4) ? n : n > 4 ? 4 : RES_MATCH;
     }
     // (after "aa" in the file; older files' FSR 1: bilinear. Files of the versions with FSR 3.1 / GSR 2 / DittoSR as
-    // anti-aliasing choices have "aa = fsr3" and the like and then "upscaler = bilinear" or "gsr": the "aa" one stands)
+    // anti-aliasing choices have "aa = fsr3" and the like and then "upscaler = bilinear" or "gsr": the "aa" one stands.
+    // Older names: "gsr2" and "dittosr_exp2" (Snapdragon GSR 2, DittoSR Experiment 2) are DittoSR now, "dittosr_exp"
+    // DittoSR (FSR4), "gsr" (Snapdragon GSR 1) bilinear)
     else if (!strcmp(key, "upscaler")) {
-        int u = !strcmp(val, "fsr3") ? UPSCALE_FSR3 : !strcmp(val, "gsr") ? UPSCALE_GSR : !strcmp(val, "gsr2") ? UPSCALE_GSR2 :
-                !strcmp(val, "dittosr") ? UPSCALE_DITTO : !strcmp(val, "dittosr_exp") ? UPSCALE_DITTO_EXP : !strcmp(val, "dittosr_exp2") ? UPSCALE_DITTO_EXP2 : UPSCALE_BILINEAR;
+        int u = !strcmp(val, "fsr3") ? UPSCALE_FSR3 :
+                !strcmp(val, "dittosr") || !strcmp(val, "gsr2") || !strcmp(val, "dittosr_exp2") ? UPSCALE_DITTOSR :
+                !strcmp(val, "dittosr_fsr4") || !strcmp(val, "dittosr_exp") ? UPSCALE_DITTO_FSR4 :
+                UPSCALE_BILINEAR;
         if (!aa_upscaled || UPSCALE_TEMPORAL(u)) g_settings.upscaler_pick = u;
     }
     // (an older "antialias = off" was only LAS Recomp's default being saved: a new key, so SMAA starts on)
@@ -140,12 +144,13 @@ static void parse_line(const char *line) {
     // (after "smaa" in the file: the choice among the three; "smaa" stays for older versions)
     else if (!strcmp(key, "aa")) {
         // (the temporal upscalers were anti-aliasing choices: such a file's upscaler)
-        int u = !strcmp(val, "fsr3") ? UPSCALE_FSR3 : !strcmp(val, "gsr2") ? UPSCALE_GSR2 : !strcmp(val, "dittosr") ? UPSCALE_DITTO : -1;
+        int u = !strcmp(val, "fsr3") ? UPSCALE_FSR3 : !strcmp(val, "gsr2") ? UPSCALE_DITTOSR : !strcmp(val, "dittosr") ? UPSCALE_DITTO_FSR4 : -1;
         if (u >= 0) g_settings.upscaler_pick = u, aa_upscaled = true;
         else g_settings.antialias = !strcmp(val, "taa") ? AA_TAA : !strcmp(val, "smaa") ? AA_SMAA : AA_OFF;
     }
     else if (!strcmp(key, "taa_sharpness")) g_settings.taa_sharpness = (float)atof(val);
     else if (!strcmp(key, "fsr3_sharpness")) g_settings.fsr3_sharpness = (float)atof(val);
+    else if (!strncmp(key, "exp2_", 5)) {}  // (DittoSR's options of a test version: built in now)
     else if (!strcmp(key, "fsr3_preset"))
         g_settings.fsr3_preset = !strcmp(val, "native") ? FSR3_NATIVE_AA : !strcmp(val, "balanced") ? FSR3_BALANCED :
                                  !strcmp(val, "performance") ? FSR3_PERFORMANCE : !strcmp(val, "ultra") ? FSR3_ULTRA_PERFORMANCE : FSR3_QUALITY;
@@ -183,8 +188,8 @@ void settings_clamp_color(void) {
 // page; it was 100 at 2 with 16 / 12 / 8 samples), 8 samples high, 6 medium, 4 low (the accumulation evens out the
 // noise). GI high: the parameters it had before the levels (4 rays x 8 steps at half the scene's size); medium and low
 // keep the look (strength, reach, accumulation over frames) with less work: 3 rays x 6 steps at half the size, 2 x 6 at a
-// third (about 1/2 and 1/6 of high's). The upscaler: FSR 3.1 when it is the anti-aliasing, else the pick - bilinear or
-// Snapdragon GSR 1 (FSR 1 stays only as FSR 3.1's fallback without its DLL: exec.c post_process).
+// third (about 1/2 and 1/6 of high's). The upscaler: FSR 3.1 when it is the anti-aliasing, else the pick - bilinear, DittoSR
+// or DittoSR (FSR4) (FSR 1 stays only as FSR 3.1's fallback without its DLL: exec.c post_process).
 // fx_custom (F12 Advanced): the parameters are the player's, kept as they are (into their ranges); the levels turn the
 // SSAO and the GI on and off, and the contact shadows keep their own switch. The sliders start from the level's
 // values: moving one is what turns fx_custom on (runtime/ui/settings_ui.mm), and its reset hands them back.
@@ -226,10 +231,7 @@ void settings_apply_levels(void) {
     }
     if (g_settings.antialias < AA_OFF || g_settings.antialias > AA_TAA) g_settings.antialias = AA_SMAA;
     int u = g_settings.upscaler_pick;
-    if (u != UPSCALE_FSR3 && u != UPSCALE_GSR && !UPSCALE_IS_GSR2(u) && !UPSCALE_IS_DITTO(u)) g_settings.upscaler_pick = u = UPSCALE_BILINEAR;
-#ifndef __ANDROID__
-    if (u == UPSCALE_GSR) u = UPSCALE_BILINEAR;  // (Snapdragon GSR 1: the phones' upscaler)
-#endif
+    if (u != UPSCALE_FSR3 && !UPSCALE_IS_DITTOSR(u) && !UPSCALE_IS_FSR4(u)) g_settings.upscaler_pick = u = UPSCALE_BILINEAR;
     g_settings.upscaler = u;
     if (g_settings.frame_gen != FG_AUTO && (g_settings.frame_gen < 2 || g_settings.frame_gen > 4)) g_settings.frame_gen = 0;
     if (g_settings.fg_method != FG_FLOW) g_settings.fg_method = FG_RERENDER;
@@ -292,9 +294,10 @@ void settings_save(void) {
     fprintf(f, "smaa = %d\n", g_settings.antialias != AA_OFF);
     fprintf(f, "aa = %s\n", g_settings.antialias == AA_TAA ? "taa" : g_settings.antialias == AA_SMAA ? "smaa" : "off");
     // (an older version reads "fsr3" here as FSR 3.1, the others as bilinear)
-    static const char *const ups[] = {"bilinear", "bilinear", "bilinear", "fsr3", "gsr", "gsr2", "dittosr", "dittosr_exp", "dittosr_exp2"};
+    static const char *const ups[] = {"bilinear", "bilinear", "bilinear", "fsr3", "bilinear", "bilinear", "dittosr_fsr4", "bilinear",
+                                      "dittosr"};
     int up = g_settings.upscaler_pick;
-    fprintf(f, "upscaler = %s\n", ups[up >= 0 && up <= UPSCALE_DITTO_EXP2 ? up : 0]);
+    fprintf(f, "upscaler = %s\n", ups[up >= 0 && up <= UPSCALE_DITTOSR ? up : 0]);
     fprintf(f, "taa_sharpness = %.2f\n", g_settings.taa_sharpness);
     fprintf(f, "fsr3_sharpness = %.2f\n", g_settings.fsr3_sharpness);
     static const char *const presets[] = {"native", "quality", "balanced", "performance", "ultra"};
