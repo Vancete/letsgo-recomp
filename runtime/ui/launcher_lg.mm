@@ -34,6 +34,7 @@ extern "C" {
 void settings_save(void);
 void ui_window_init(void);
 SDL_Window *ui_window(void);
+void ui_window_game_size(SDL_Window *win, int *w, int *h);
 void menu_apply_window_requests(void *sdl_window);
 bool vk_frame_begin(const float clear[4]);
 void vk_frame_end(const char *shot_path);
@@ -378,19 +379,15 @@ static void mods_section(SDL_Window *win, int inst) {
 // ------------------------------------------------------------------ the launcher's window
 // A launcher's own window while the start screen is up: no system frame (dragged by its top strip; its own minimize and
 // close buttons), taller than wide, in the middle of the screen. Play gives the game its window back: the frame, the
-// size it had (1280 x 720, or LARECOMP_WINDOW) and full screen when that setting is on.
+// size of the resolution chosen (Automatic: the game's 1280 x 720; device.c ui_window_game_size) and full screen when
+// that setting is on.
 static float g_drag_h, g_buttons_w;  // (logical pixels: the strip that drags the window, the buttons at its right end)
 static SDL_HitTestResult SDLCALL launcher_hit(SDL_Window *win, const SDL_Point *pt, void *) {
     int w = 0, h = 0;
     SDL_GetWindowSize(win, &w, &h);
     return pt->y < g_drag_h && pt->x < w - g_buttons_w ? SDL_HITTEST_DRAGGABLE : SDL_HITTEST_NORMAL;
 }
-static int g_game_w = 1280, g_game_h = 720;
 static void window_as_launcher(SDL_Window *win) {
-    int w, h;
-    SDL_GetWindowSize(win, &w, &h);
-    if (!(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) && w > 0 && h > 0 && !getenv("LARECOMP_LAUNCHER_SHOT")) g_game_w = w, g_game_h = h;
-    if (getenv("LARECOMP_WINDOW")) sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", &g_game_w, &g_game_h);
 #ifndef __ANDROID__  // (a phone has no window: always the whole screen)
     SDL_SetWindowFullscreen(win, false);
 #endif
@@ -407,7 +404,9 @@ static void window_as_game(SDL_Window *win) {
     SDL_SetWindowHitTest(win, NULL, NULL);
     SDL_SetWindowBordered(win, true);
     SDL_SetWindowResizable(win, true);
-    SDL_SetWindowSize(win, g_game_w, g_game_h);
+    int gw, gh;
+    ui_window_game_size(win, &gw, &gh);
+    SDL_SetWindowSize(win, gw, gh);
     SDL_SetWindowPosition(win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(win, true);
     // black at the new size until the game draws (else the launcher's last image stayed in a corner while it loads);

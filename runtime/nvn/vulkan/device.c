@@ -1374,6 +1374,24 @@ static void quick_exit_handler(void) {
 #endif
 }
 
+// The game's window when it is not full screen (the launcher's Play, a start without the launcher): the launcher's
+// resolution in pixels, 16:9 - Automatic: the game's own 1280 x 720 -, in the window's coordinates (pixels over its pixel
+// density), smaller with the same shape where the desktop's usable area has no room for it (the render keeps the
+// resolution chosen). LARECOMP_WINDOW (tests) as it says.
+void ui_window_game_size(SDL_Window *win, int *w, int *h) {
+    if (getenv("LARECOMP_WINDOW") && sscanf(getenv("LARECOMP_WINDOW"), "%dx%d", w, h) == 2) return;
+    float ph = g_settings.res_height > 0 ? (float)g_settings.res_height : 720.0f, pw = ph * 16.0f / 9.0f;
+    float pd = SDL_GetWindowPixelDensity(win);
+    if (!(pd > 0)) pd = 1;
+    float fw = pw / pd, fh = ph / pd, k = 1;
+    SDL_Rect usable;
+    if (SDL_GetDisplayUsableBounds(SDL_GetDisplayForWindow(win), &usable) && usable.w > 0 && usable.h > 0) {
+        // (the height less a title bar's room)
+        k = fminf(1.0f, fminf((float)usable.w / fw, (float)usable.h * 0.94f / fh));
+    }
+    *w = (int)lroundf(fw * k), *h = (int)lroundf(fh * k);
+}
+
 void ui_window_init(void) {
     if (window) return;
     atexit(quick_exit_handler);
@@ -1389,6 +1407,11 @@ void ui_window_init(void) {
     window = SDL_CreateWindow(RT_APP_NAME, win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
+    if (!getenv("LARECOMP_WINDOW") && !g_settings.fullscreen) {  // (the size the setting asks: ui_window_game_size)
+        ui_window_game_size(window, &win_w, &win_h);
+        SDL_SetWindowSize(window, win_w, win_h);
+        SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    }
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
     if (g_settings.fullscreen && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) SDL_SetWindowFullscreen(window, true);
     create_instance();
