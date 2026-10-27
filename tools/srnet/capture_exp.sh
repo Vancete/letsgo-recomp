@@ -6,7 +6,7 @@
 # scripted walks. About 11 MB a frame at 3x.
 set -u
 DATA=${1:?data folder}; shift
-RUNS=${*:-walk down menu diag zigzag val}
+RUNS=${*:-walk down menu diag zigzag val rest stopgo restval}
 HERE=$(cd "$(dirname "$0")/../.." && pwd)
 declare -A IN=(
     [walk]=",1250:STICK_LEFT:200,1500:STICK_UP:200,1760:STICK_RIGHT:120"
@@ -15,6 +15,10 @@ declare -A IN=(
     [diag]=",1250:STICK_45:160,1420:STICK_225:160,1600:STICK_135:200"
     [zigzag]=",1250:STICK_LEFT:40,1290:STICK_UP:40,1330:STICK_LEFT:40,1370:STICK_UP:40,1440:STICK_RIGHT:60,1500:STICK_DOWN:60,1600:STICK_315:120,1760:STICK_90:60"
     [val]=",1250:STICK_UP:100,1380:STICK_RIGHT:100,1500:X:6,1580:B:6,1650:STICK_270:150"
+    # (at rest: no input; short steps between long stops - the student's shimmer at rest, v2; restval for validation)
+    [rest]=""
+    [stopgo]=",1250:STICK_LEFT:40,1420:STICK_UP:30,1600:STICK_RIGHT:30,1760:STICK_45:20"
+    [restval]=",1250:STICK_LEFT:30,1500:STICK_225:20"
 )
 for r in $RUNS; do
     mkdir -p "$DATA/$r"

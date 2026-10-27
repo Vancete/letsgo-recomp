@@ -12,7 +12,8 @@ srnet_student.h, is never committed). The width of the hidden layers (<PREFIX>_H
 The shader declares T (float / float16_t) and V2 (vec2 / f16vec2): two output channels a V2 (packed FP16).
 _l1: from F[input][fi + tap offset] (the 20-wide tile) into a0.., before the ReLU.
 _l1_store: their ReLU (zero off the image: in_) into L[channel][k] (the 18-wide tile).
-_l2: from L[input][li2 + tap offset] into c0.., before the ReLU.
+_l2: from L[input][li2 + tap offset] into c0.., before the ReLU (a separable layer, c2d / c2p in the weights: the 3x3
+per channel into e0.., then the 1x1 across them).
 _l2_relu: their ReLU, as vec2 d0...
 _l3: from d0.. into r0.. (5 corrections, 2 state channels, then the residual's 3 x RES x RES).
 _out: the stores - CorrA, CorrB and (RES, pc.b.y = 1) the residual's RES x RES output pixels of each render pixel
@@ -43,6 +44,22 @@ def conv(w, b, src, idx, width, out):
             for k in range(co // 2):
                 s.append(f"{out}{k} += V2({lit(w[2 * k, i, t // 3, t % 3])}, {lit(w[2 * k + 1, i, t // 3, t % 3])}) * v;")
             s.append("}")
+    return s
+
+
+def sep_conv(wd, wp, b, src, idx, width, out):
+    """A separable 3x3: wd hid x 1 x 3 x 3 per channel (no bias), then wp out x hid x 1 x 1."""
+    hid, co = wd.shape[0], wp.shape[0]
+    s = [f"V2 e{k} = V2(0.0);" for k in range(hid // 2)]
+    for t in range(9):
+        off = (t // 3) * width + t % 3
+        for k in range(hid // 2):
+            s.append(f"e{k} += V2({lit(wd[2 * k, 0, t // 3, t % 3])}, {lit(wd[2 * k + 1, 0, t // 3, t % 3])}) * "
+                     f"V2({src}[{2 * k}][{idx} + {off}], {src}[{2 * k + 1}][{idx} + {off}]);")
+    for k in range(co // 2):
+        s.append(f"V2 {out}{k} = V2({lit(b[2 * k])}, {lit(b[2 * k + 1])});")
+        for i in range(hid):
+            s.append(f"{out}{k} += V2({lit(wp[2 * k, i, 0, 0])}, {lit(wp[2 * k + 1, i, 0, 0])}) * e{i // 2}.{'xy'[i % 2]};")
     return s
 
 
@@ -103,7 +120,8 @@ def main():
         f.write(f"#define {p.upper()}_HID {hid}\n#define {p.upper()}_RES {res}\n")
         f.write(cstr(f"{p}_l1_glsl", conv(sd["c1.weight"], sd["c1.bias"], "F", "fi", 20, "a")))
         f.write(cstr(f"{p}_l1_store_glsl", l1_store(hid)))
-        f.write(cstr(f"{p}_l2_glsl", conv(sd["c2.weight"], sd["c2.bias"], "L", "li2", 18, "c")))
+        f.write(cstr(f"{p}_l2_glsl", sep_conv(sd["c2d.weight"], sd["c2p.weight"], sd["c2p.bias"], "L", "li2", 18, "c")
+                     if "c2d.weight" in sd else conv(sd["c2.weight"], sd["c2.bias"], "L", "li2", 18, "c")))
         f.write(cstr(f"{p}_l2_relu_glsl", l2_relu(hid)))
         f.write(cstr(f"{p}_l3_glsl", dense(sd["c3.weight"][:, :, 0, 0], sd["c3.bias"])))
         f.write(cstr(f"{p}_out_glsl", out(res)))

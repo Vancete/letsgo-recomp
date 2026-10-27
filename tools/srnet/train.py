@@ -7,6 +7,10 @@ The first WARM frames build the history without gradients, then TRAIN frames are
 and the network's state carry the gradient from frame to frame). The loss, on the final image (after the line pass)
 against the 16-sample reference, the interface left out: Charbonnier + its gradients' L1 (detail) + the temporal
 term - the frame-to-frame change (along the motion) that the reference does not have (shimmer, flicker).
+
+v2 (the teacher's students, LOCAL research): --warm / --train / --crop / --batch (a longer unroll: the history as
+settled as at rest), --rest W (the temporal term W + 1 times as heavy where the image does not move: the shimmer at
+rest), --sep (model.py TinyNet's separable second layer), --restval (a validation run at rest: its temporal error).
 """
 import argparse
 import os
@@ -153,7 +157,7 @@ def grad(x):
     return x[..., 1:, :] - x[..., :-1, :], x[..., :, 1:] - x[..., :, :-1]
 
 
-def run_seq(net, frames, meta, train_from):
+def run_seq(net, frames, meta, train_from, w_rest=0.0):
     """Unrolls the upscaler over the frames; returns the per-frame finals from train_from on (and the loss parts)."""
     hist = state = None
     prev_final = prev_ref = None
@@ -181,6 +185,9 @@ def run_seq(net, frames, meta, train_from):
                     uv, mo = out_uv_motion(fr["mv"], meta["out_size"])
                     pu = uv - mo
                     vis = ((pu >= 0) & (pu <= 1)).all(-1).unsqueeze(1).float() * wmask
+                    if w_rest:  # (heavier where it does not move: under a quarter of an output pixel)
+                        px = (mo * torch.tensor(meta["out_size"], device=mo.device, dtype=mo.dtype)).norm(dim=-1)
+                        vis = vis * (1.0 + w_rest * torch.exp(-4.0 * px).unsqueeze(1))
                     dt_out = final - M.sample(prev_final, pu)
                     dt_ref = ref - M.sample(prev_ref, pu)
                     parts[2] = parts[2] + ((dt_out - dt_ref).abs() * vis).sum() / (vis.sum() * 3 + 1)
@@ -220,19 +227,29 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--hid", type=int, default=16)
     ap.add_argument("--res", type=int, default=0, help="a detail residual at this ratio (LOCAL research)")
+    ap.add_argument("--sep", action="store_true", help="the second layer separable")
+    ap.add_argument("--warm", type=int, default=WARM)
+    ap.add_argument("--train", type=int, default=TRAIN)
+    ap.add_argument("--crop", type=int, default=CROP)
+    ap.add_argument("--batch", type=int, default=BATCH)
+    ap.add_argument("--rest", type=float, default=0.0, help="the temporal term's extra weight at rest")
+    ap.add_argument("--restval", default="", help="a validation run at rest")
     a = ap.parse_args()
     random.seed(a.seed)
     torch.manual_seed(a.seed)
     dev = "cuda"
     seqs = load_runs(a.data, a.runs.split(","))
     val = load_runs(a.data, [a.val])
+    rval = load_runs(a.data, [a.restval]) if a.restval else []
     print(f"{sum(len(s) for s in seqs)} training frames in {len(seqs)} sequences, {sum(len(s) for s in val)} for validation")
-    net = M.Upscaler(use_net=True, hid=a.hid, res_ratio=a.res).to(dev)
+    net = M.Upscaler(use_net=True, hid=a.hid, res_ratio=a.res, sep=a.sep).to(dev)
     base = M.Upscaler(use_net=False).to(dev)
     print(f"parameters: {sum(p.numel() for p in net.parameters())}")
     ratios = sorted({r for s in seqs for r in s[0].lr})
     for r in ratios:
         print(f"DittoSR alone at {r}x: PSNR %.2f, Charbonnier %.4f, temporal %.4f" % evaluate(base, val, r))
+        if rval:
+            print(f"  at rest {r}x: PSNR %.2f, Charbonnier %.4f, temporal %.4f" % evaluate(base, rval, r))
     opt = torch.optim.Adam(net.parameters(), lr=a.lr)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, a.lr, total_steps=a.steps, pct_start=0.05)
     t0 = time.time()
@@ -242,12 +259,12 @@ def main():
 
     def reader():
         for step in range(1, a.steps + 1):
-            q.put(batch(seqs, ratios[step % len(ratios)], BATCH, WARM + TRAIN, dev=dev))
+            q.put(batch(seqs, ratios[step % len(ratios)], a.batch, a.warm + a.train, crop=a.crop, dev=dev))
 
     threading.Thread(target=reader, daemon=True).start()
     for step in range(1, a.steps + 1):
         frames, meta = q.get()
-        _, parts = run_seq(net, frames, meta, WARM)
+        _, parts = run_seq(net, frames, meta, a.warm, a.rest)
         loss = parts[0] + W_DETAIL * parts[1] + W_TEMPORAL * parts[2]
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -262,6 +279,8 @@ def main():
         if step % 1000 == 0 or step == a.steps:
             for rr in ratios:
                 print(f"  val {rr}x: PSNR %.2f, Charbonnier %.4f, temporal %.4f" % evaluate(net, val, rr), flush=True)
+                if rval:
+                    print(f"  at rest {rr}x: PSNR %.2f, Charbonnier %.4f, temporal %.4f" % evaluate(net, rval, rr), flush=True)
             torch.save(net.net.state_dict(), a.out)
 
 

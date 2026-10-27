@@ -100,20 +100,26 @@ def smoothstep(a, b, x):
 
 class TinyNet(nn.Module):
     """The network: 10 inputs at the render size -> 5 corrections + 2 state channels (+ res: a detail residual, the
-    output's r x r pixels per render pixel - LOCAL research, the teacher's students). ~3.9k parameters at hid 16."""
+    output's r x r pixels per render pixel - LOCAL research, the teacher's students). ~3.9k parameters at hid 16.
+    sep: the second layer separable - a 3x3 per channel (c2d), then a 1x1 across them (c2p): 9 + hid instead of 9 x hid
+    products per output channel."""
     IN, HID, OUT, STATE = 10, 16, 5, 2
 
-    def __init__(self, hid=16, res=0):
+    def __init__(self, hid=16, res=0, sep=False):
         super().__init__()
         self.c1 = nn.Conv2d(self.IN, hid, 3, padding=1)
-        self.c2 = nn.Conv2d(hid, hid, 3, padding=1)
+        if sep:
+            self.c2d = nn.Conv2d(hid, hid, 3, padding=1, groups=hid, bias=False)
+            self.c2p = nn.Conv2d(hid, hid, 1)
+        else:
+            self.c2 = nn.Conv2d(hid, hid, 3, padding=1)
         self.c3 = nn.Conv2d(hid, self.OUT + self.STATE + res, 1)
         nn.init.zeros_(self.c3.weight)
         nn.init.zeros_(self.c3.bias)
 
     def forward(self, x):
         x = F.relu(self.c1(x))
-        x = F.relu(self.c2(x))
+        x = F.relu(self.c2p(self.c2d(x)) if hasattr(self, "c2p") else self.c2(x))
         return self.c3(x)
 
 
@@ -121,10 +127,10 @@ class Upscaler(nn.Module):
     """opts (DittoSR's ghosting and settling, 1 on as the runtime's - built in there; 0 off): greact (the reaction to a
     large change of the image), dilate (the nearest motion of the 3x3), vrej (the rejection by a changed motion), minmax
     (the box within the samples' range in motion); drej (the rejection by a changed depth: tried, not taken - off)."""
-    def __init__(self, use_net=True, opts=None, hid=16, res_ratio=0):
+    def __init__(self, use_net=True, opts=None, hid=16, res_ratio=0, sep=False):
         super().__init__()
         self.res_ratio = res_ratio  # (a detail residual added to the final image: res_ratio^2 x 3 channels, pixel-shuffled)
-        self.net = TinyNet(hid, 3 * res_ratio * res_ratio) if use_net else None
+        self.net = TinyNet(hid, 3 * res_ratio * res_ratio, sep) if use_net else None
         self.opts = {"greact": 1.0, "drej": 0.0, "dilate": 1.0, "vrej": 1.0, "minmax": 1.0, **(opts or {})}
         self.prev_mda = None
 
