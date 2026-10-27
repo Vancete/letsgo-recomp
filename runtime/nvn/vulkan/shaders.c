@@ -7,6 +7,18 @@
 
 #include "shaders.h"
 #include "srnet_weights.h"  // (LOCAL experiment, DittoSR Net: srnet.comp)
+#if __has_include("srnet_student.h")
+#include "srnet_student.h"  // (LOCAL research, never committed: the teacher's student - srnet_s.comp)
+#endif
+
+// (LOCAL research: 1 where the teacher's student is built in - srnet_s.comp, DittoSR Net (student) in the menu)
+int vk_srnet_student(void) {
+#ifdef SRNET_S_HID
+    return 1;
+#else
+    return 0;
+#endif
+}
 
 void vk_shaders_init(void) {  // (compilers are per thread: check shaderc works at all)
     shaderc_compiler_t c = shaderc_compiler_initialize();
@@ -1235,6 +1247,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(set = 0, binding = 1) uniform sampler2D t1;\n"
                "layout(set = 0, binding = 2) uniform sampler2D m;\n"
                "layout(set = 0, binding = 3) uniform sampler2D CorrB;\n"
+               "layout(set = 0, binding = 4) uniform sampler2D Res;\n"
                "layout(location = 0) out vec4 o;\n"
                "vec3 tap(ivec2 p) { return texelFetch(t0, clamp(p, ivec2(0), ivec2(pc.b.xy) - 1), 0).rgb; }\n"
                "vec3 cr(vec2 uv) {\n"
@@ -1261,6 +1274,8 @@ static const char *builtin_src(const char *name, int *stage) {
                "  vec3 mn = min(min(min(a, b), min(c, d)), min(min(e, f), min(min(g, h), i)));\n"
                "  vec3 mx = max(max(max(a, b), max(c, d)), max(max(e, f), max(max(g, h), i)));\n"
                "  r = clamp(r, max(mn - pc.a.z * (mx - mn), 0.0), mx);\n"
+               // (DittoSR Net (student), c.y = 1: the network's detail residual, written up to c.zw - srnet_s.comp's Res)
+               "  if (pc.c.y > 0.5 && all(lessThan(ip, ivec2(pc.c.zw)))) r = clamp(r + texelFetch(Res, ip, 0).rgb, 0.0, 1.0);\n"
                "  float k = pc.a.w > 0.5 ? texture(m, uv).r : 0.0;\n"
                "  o = vec4(k > 0.0 ? mix(r, cr(uv), k) : r, 1.0);\n"
                "}\n";
@@ -1312,11 +1327,24 @@ static const char *builtin_src(const char *name, int *stage) {
     // srnet16.comp: the same in half precision (the shared tiles and the arithmetic, two output channels a vec2: packed
     // FP16 where the GPU has it - exec.c picks it with shaderFloat16). The layers are straight-line code with the weights
     // as literals (srnet_weights.h): indexed in loops they went to memory (3 ms at 1280 x 720 in FP32, 20 in FP16).
-    if (!strcmp(name, "srnet.comp") || !strcmp(name, "srnet16.comp")) {
+    // srnet_s.comp / srnet_s16.comp (LOCAL research, srnet_student.h where it is: never committed): a student of
+    // DittoSR Experiment (tools/srnet capture_exp.sh, train.py --hid --res), the same pass with wider layers and, its
+    // RES > 0, a detail residual: each render pixel's RES x RES output pixels into Res (binding 6, RGBA16F at the
+    // output size, b.y = 1), x2_final.frag adds it.
+    if (!strcmp(name, "srnet.comp") || !strcmp(name, "srnet16.comp") || !strcmp(name, "srnet_s.comp") ||
+        !strcmp(name, "srnet_s16.comp")) {
         *stage = STAGE_COMPUTE;
-        static char *src[2];
-        int k16 = !strcmp(name, "srnet16.comp");
-        if (!src[k16]) {
+        static char *src[4];
+        int k16 = strstr(name, "16") != NULL, st = !strncmp(name, "srnet_s", 7), w = st * 2 + k16;
+        if (!src[w]) {
+            const char *l1 = srnet_l1_glsl, *l1s = srnet_l1_store_glsl, *l2 = srnet_l2_glsl, *l2r = srnet_l2_relu_glsl,
+                       *l3 = srnet_l3_glsl, *lo = srnet_out_glsl;
+            int hid = SRNET_HID, res = SRNET_RES;
+#ifdef SRNET_S_HID
+            if (st)
+                l1 = srnet_s_l1_glsl, l1s = srnet_s_l1_store_glsl, l2 = srnet_s_l2_glsl, l2r = srnet_s_l2_relu_glsl,
+                l3 = srnet_s_l3_glsl, lo = srnet_s_out_glsl, hid = SRNET_S_HID, res = SRNET_S_RES;
+#endif
             static const char *head =
                 "#version 450\n"
                 "layout(local_size_x = 16, local_size_y = 16) in;\n"
@@ -1327,12 +1355,13 @@ static const char *builtin_src(const char *name, int *stage) {
                 "layout(set = 0, binding = 3) uniform sampler2D StatePrev;\n"
                 "layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D CorrA;\n"
                 "layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D CorrB;\n";
+            static const char *hres = "layout(set = 0, binding = 6, rgba16f) uniform writeonly image2D Res;\n";
             static const char *t32 = "#define T float\n#define V2 vec2\n";
             static const char *t16 = "#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require\n"
                                      "#define T float16_t\n#define V2 f16vec2\n";
+            char sh[64];
+            snprintf(sh, sizeof sh, "shared T F[10][400];\nshared T L[%d][324];\n", hid);
             static const char *b1 =
-                "shared T F[10][400];\n"
-                "shared T L[16][324];\n"
                 "vec3 ycc(vec3 c) { return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * (c.r - c.b), 0.5 * c.g - 0.25 * (c.r + c.b)); }\n"
                 "void main() {\n"
                 "  ivec2 rs = ivec2(pc.a.xy), base = ivec2(gl_WorkGroupID.xy) * 16;\n"
@@ -1358,34 +1387,20 @@ static const char *builtin_src(const char *name, int *stage) {
                 "    ivec2 q = ivec2(int(k % 18u), int(k / 18u)), p = base + q - 1;\n"
                 "    int fi = q.y * 20 + q.x;\n";
             static const char *b2 =
-                "    bool in_ = all(greaterThanEqual(p, ivec2(0))) && all(lessThan(p, rs));\n"
-                "    V2 z = V2(0.0);\n"
-                "    a0 = in_ ? max(a0, z) : z; a1 = in_ ? max(a1, z) : z; a2 = in_ ? max(a2, z) : z; a3 = in_ ? max(a3, z) : z;\n"
-                "    a4 = in_ ? max(a4, z) : z; a5 = in_ ? max(a5, z) : z; a6 = in_ ? max(a6, z) : z; a7 = in_ ? max(a7, z) : z;\n"
-                "    L[0][k] = a0.x; L[1][k] = a0.y; L[2][k] = a1.x; L[3][k] = a1.y; L[4][k] = a2.x; L[5][k] = a2.y;\n"
-                "    L[6][k] = a3.x; L[7][k] = a3.y; L[8][k] = a4.x; L[9][k] = a4.y; L[10][k] = a5.x; L[11][k] = a5.y;\n"
-                "    L[12][k] = a6.x; L[13][k] = a6.y; L[14][k] = a7.x; L[15][k] = a7.y;\n"
                 "  }\n"
                 "  barrier();\n"
                 "  ivec2 lp = ivec2(gl_LocalInvocationID.xy), p = base + lp;\n"
                 "  if (any(greaterThanEqual(p, rs))) return;\n"
                 "  int li2 = lp.y * 18 + lp.x;\n";
-            static const char *b3 =
-                "  V2 z = V2(0.0);\n"
-                "  vec2 d0 = vec2(max(c0, z)), d1 = vec2(max(c1, z)), d2 = vec2(max(c2, z)), d3 = vec2(max(c3, z));\n"
-                "  vec2 d4 = vec2(max(c4, z)), d5 = vec2(max(c5, z)), d6 = vec2(max(c6, z)), d7 = vec2(max(c7, z));\n";
-            static const char *b4 =
-                "  imageStore(CorrA, p, 2.0 * tanh(0.5 * vec4(r0, r1, r2, r3)));\n"
-                "  imageStore(CorrB, p, vec4(2.0 * tanh(0.5 * r4), tanh(r5), tanh(r6), 0.0));\n"
-                "}\n";
-            const char *parts[] = {head, k16 ? t16 : t32, b1, srnet_l1_glsl, b2, srnet_l2_glsl, b3, srnet_l3_glsl, b4};
+            const char *parts[] = {head, res ? hres : "", k16 ? t16 : t32, sh, b1, l1, l1s, b2, l2, l2r, l3, lo, "}\n"};
+            int np = (int)(sizeof parts / sizeof *parts);
             size_t n = 1;
-            for (int i = 0; i < 9; i++) n += strlen(parts[i]);
-            src[k16] = malloc(n);
-            src[k16][0] = 0;
-            for (int i = 0; i < 9; i++) strcat(src[k16], parts[i]);
+            for (int i = 0; i < np; i++) n += strlen(parts[i]);
+            src[w] = malloc(n);
+            src[w][0] = 0;
+            for (int i = 0; i < np; i++) strcat(src[w], parts[i]);
         }
-        return src[k16];
+        return src[w];
     }
     // ---- LOCAL research, the tiny network's training pairs (exec.c srcap_run, LARECOMP_SRCAP): from one image rendered
     // at K x the output (no jitter), a.x = what: 0 the reference (a K x K box, a.y = K; alpha the interface mask's

@@ -21,8 +21,10 @@ enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25
 // (4, 5: Snapdragon GSR 1 / 2, removed)
 enum { UPSCALE_BILINEAR = 0, UPSCALE_FSR1 = 2 /* AMD FSR 1 */, UPSCALE_FSR3 = 3, UPSCALE_DITTO_FSR4 = 6,
        UPSCALE_DITTO_EXP = 7 /* (local experiment: DittoSR (FSR4)'s cheaper variants, ditto_sr.h) */, UPSCALE_DITTOSR = 8,
-       UPSCALE_DITTOSR_NET = 9 /* (local experiment: DittoSR with our tiny network - exec.c srnet_run, tools/srnet) */ };
-#define UPSCALE_IS_DITTOSR(u) ((u) == UPSCALE_DITTOSR || (u) == UPSCALE_DITTOSR_NET)
+       UPSCALE_DITTOSR_NET = 9 /* (local experiment: DittoSR with our tiny network - exec.c srnet_run, tools/srnet) */,
+       UPSCALE_DITTOSR_NET_S = 10 /* (LOCAL research: DittoSR Net with the teacher's student, srnet_student.h where it is) */ };
+#define UPSCALE_IS_NET(u) ((u) == UPSCALE_DITTOSR_NET || (u) == UPSCALE_DITTOSR_NET_S)
+#define UPSCALE_IS_DITTOSR(u) ((u) == UPSCALE_DITTOSR || UPSCALE_IS_NET(u))
 #define UPSCALE_IS_FSR4(u) ((u) == UPSCALE_DITTO_FSR4 || (u) == UPSCALE_DITTO_EXP)
 // the temporal upscalers: they anti-alias the image themselves (the anti-aliasing setting is set aside) and take a mode
 // (fsr3_preset) for the render resolution

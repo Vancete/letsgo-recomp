@@ -136,7 +136,7 @@ static void parse_line(const char *line) {
         int u = !strcmp(val, "fsr3") ? UPSCALE_FSR3 :
                 !strcmp(val, "dittosr") || !strcmp(val, "gsr2") || !strcmp(val, "dittosr_exp2") ? UPSCALE_DITTOSR :
                 !strcmp(val, "dittosr_fsr4") ? UPSCALE_DITTO_FSR4 : !strcmp(val, "dittosr_exp") ? UPSCALE_DITTO_EXP :
-                !strcmp(val, "x2net") ? UPSCALE_DITTOSR_NET : UPSCALE_BILINEAR;
+                !strcmp(val, "x2net") ? UPSCALE_DITTOSR_NET : !strcmp(val, "x2net_s") ? UPSCALE_DITTOSR_NET_S : UPSCALE_BILINEAR;
         if (!aa_upscaled || UPSCALE_TEMPORAL(u)) g_settings.upscaler_pick = u;
     }
     // (an older "antialias = off" was only LAS Recomp's default being saved: a new key, so SMAA starts on)
@@ -295,9 +295,9 @@ void settings_save(void) {
     fprintf(f, "aa = %s\n", g_settings.antialias == AA_TAA ? "taa" : g_settings.antialias == AA_SMAA ? "smaa" : "off");
     // (an older version reads "fsr3" here as FSR 3.1, the others as bilinear)
     static const char *const ups[] = {"bilinear", "bilinear", "bilinear", "fsr3", "bilinear", "bilinear", "dittosr_fsr4", "dittosr_exp",
-                                      "dittosr", "x2net"};
+                                      "dittosr", "x2net", "x2net_s"};
     int up = g_settings.upscaler_pick;
-    fprintf(f, "upscaler = %s\n", ups[up >= 0 && up <= UPSCALE_DITTOSR_NET ? up : 0]);
+    fprintf(f, "upscaler = %s\n", ups[up >= 0 && up <= UPSCALE_DITTOSR_NET_S ? up : 0]);
     fprintf(f, "taa_sharpness = %.2f\n", g_settings.taa_sharpness);
     fprintf(f, "fsr3_sharpness = %.2f\n", g_settings.fsr3_sharpness);
     static const char *const presets[] = {"native", "quality", "balanced", "performance", "ultra"};

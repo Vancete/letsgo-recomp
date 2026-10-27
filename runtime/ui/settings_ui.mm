@@ -13,6 +13,7 @@ extern "C" {
 #include "../paths.h"
 #include "../settings.h"
 bool dittosr_present(void);  // runtime/nvn/vulkan/fsr3.cpp (a local test upscaler's data is there)
+int vk_srnet_student(void);  // runtime/nvn/vulkan/shaders.c (LOCAL research: the teacher's student built in)
 }
 
 // ------------------------------------------------------------------ language
@@ -567,14 +568,15 @@ void ui_page_graphics(float x, bool known) {
     {
         static int ditto = -1;
         if (ditto < 0) ditto = dittosr_present();
-        const char *names[8];
-        int ids[8], n = 0, cur = 0;
+        const char *names[9];
+        int ids[9], n = 0, cur = 0;
         names[n] = UI_T("Bilinear", "Bilinear", "Билинейное"), ids[n++] = UPSCALE_BILINEAR;
         names[n] = "FSR 3.1", ids[n++] = UPSCALE_FSR3;
         names[n] = "DittoSR", ids[n++] = UPSCALE_DITTOSR;
         if (ditto) names[n] = "DittoSR (FSR4)", ids[n++] = UPSCALE_DITTO_FSR4;
         if (ditto) names[n] = "DittoSR Experiment", ids[n++] = UPSCALE_DITTO_EXP;
         names[n] = "DittoSR Net", ids[n++] = UPSCALE_DITTOSR_NET;  // (local experiment: DittoSR + our tiny network)
+        if (vk_srnet_student()) names[n] = "DittoSR Net (student)", ids[n++] = UPSCALE_DITTOSR_NET_S;  // (LOCAL research)
         for (int i = 0; i < n; i++) if (ids[i] == g_settings.upscaler_pick) cur = i;
         ui_row(l[8], x);
         if (ui_combo("##upscaler", &cur, names, n)) g_settings.upscaler_pick = ids[cur], settings_apply_levels();

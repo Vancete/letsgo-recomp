@@ -5594,54 +5594,67 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
 // (mda), the previous upscale (prev) and its own previous state; out: CorrA (post image 53: x2_upscale.frag's
 // corrections) and CorrB (61 / 62 ping-pong: x2_final.frag's line strength and the state for the next frame), both
 // RGBA16F at the render size. srnet_corr_b: this frame's CorrB, for the final pass.
-static TexBackend *srnet_corr_b;
+// LOCAL research, DittoSR Net (student) (UPSCALE_DITTOSR_NET_S, srnet_s.comp): the teacher's student, wider, and at 3x
+// its detail residual (post image 130, RGBA16F at the output size, its 3 x the render size written: srnet_res_w / _h),
+// srnet_res for x2_final.frag; at the other ratios its corrections only (the residual was trained at 3x).
+static TexBackend *srnet_corr_b, *srnet_res;
+static uint32_t srnet_res_w, srnet_res_h;
 static TexBackend *srnet_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mda, TexBackend *prev, uint32_t ow, uint32_t oh,
                              bool reset) {
     static VkDescriptorSetLayout dsl;
     static VkPipelineLayout layout;
-    static VkPipeline pipe;
+    static VkPipeline pipes[2];
     static int cur;
-    if (!pipe) {
-        VkDescriptorSetLayoutBinding b[6];
-        for (uint32_t i = 0; i < 6; i++)
+    int st = g_settings.upscaler == UPSCALE_DITTOSR_NET_S;
+    if (!layout) {
+        VkDescriptorSetLayoutBinding b[7];  // (6: the student's residual - not written for the other)
+        for (uint32_t i = 0; i < 7; i++)
             b[i] = (VkDescriptorSetLayoutBinding){i, i < 4 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
                                                   VK_SHADER_STAGE_COMPUTE_BIT, NULL};
-        VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 6, .pBindings = b};
+        VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 7, .pBindings = b};
         VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &dsl));
         VkPushConstantRange r = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 32};
         VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl,
                                          .pushConstantRangeCount = 1, .pPushConstantRanges = &r};
         VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &ci, NULL, &layout));
+    }
+    if (!pipes[st]) {
         // (in half precision where the GPU has it: LARECOMP_SRNET_FP16=0 keeps it in single)
         bool f16 = g_vk.shader_f16 && !(getenv("LARECOMP_SRNET_FP16") && !atoi(getenv("LARECOMP_SRNET_FP16")));
-        LOG("[srnet] the network in %s precision\n", f16 ? "half" : "single");
+        LOG("[srnet] the %s in %s precision\n", st ? "student" : "network", f16 ? "half" : "single");
+        const char *sn = st ? (f16 ? "srnet_s16.comp" : "srnet_s.comp") : f16 ? "srnet16.comp" : "srnet.comp";
         VkComputePipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
                                           .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-                                                    .module = vk_builtin_shader(f16 ? "srnet16.comp" : "srnet.comp"), .pName = "main"},
+                                                    .module = vk_builtin_shader(sn), .pName = "main"},
                                           .layout = layout};
-        VK_CHECK(vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pipe));
+        VK_CHECK(vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pipes[st]));
     }
     uint32_t rw = in->width, rh = in->height;
     TexBackend *sp = post_image_fmt(61 + cur, rw, rh, VK_FORMAT_R16G16B16A16_SFLOAT);  // (the previous state)
     cur ^= 1;
     TexBackend *ca = post_image_fmt(53, rw, rh, VK_FORMAT_R16G16B16A16_SFLOAT);
     TexBackend *cb_ = post_image_fmt(61 + cur, rw, rh, VK_FORMAT_R16G16B16A16_SFLOAT);
+    bool res = st && ow + 2 >= 3 * rw && ow <= 3 * rw + 2 && oh + 2 >= 3 * rh && oh <= 3 * rh + 2;  // (3x)
+    srnet_res = res ? post_image_fmt(130, ow, oh, VK_FORMAT_R16G16B16A16_SFLOAT) : NULL;
+    srnet_res_w = ow < 3 * rw ? ow : 3 * rw, srnet_res_h = oh < 3 * rh ? oh : 3 * rh;
     VkDescriptorSet ds = vk_alloc_set(dsl);
-    VkImageView v[6] = {raw_view(in), post_view(mda), post_view(prev), post_view(sp), post_view(ca), post_view(cb_)};
-    VkDescriptorImageInfo ii[6];
-    VkWriteDescriptorSet w[6];
-    for (int i = 0; i < 6; i++) {
+    VkImageView v[7] = {raw_view(in), post_view(mda), post_view(prev), post_view(sp), post_view(ca), post_view(cb_),
+                        res ? post_view(srnet_res) : post_view(cb_)};
+    int nw = st ? 7 : 6;
+    VkDescriptorImageInfo ii[7];
+    VkWriteDescriptorSet w[7];
+    for (int i = 0; i < nw; i++) {
         ii[i] = (VkDescriptorImageInfo){i < 4 ? vk_default_sampler(true) : VK_NULL_HANDLE, v[i], VK_IMAGE_LAYOUT_GENERAL};
         w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = (uint32_t)i,
                                       .descriptorCount = 1,
                                       .descriptorType = i < 4 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                                       .pImageInfo = &ii[i]};
     }
-    vkUpdateDescriptorSets(g_vk.dev, 6, w, 0, NULL);
-    float pc[8] = {(float)rw, (float)rh, (float)ow, (float)oh, reset ? 1.0f : 0.0f};
+    vkUpdateDescriptorSets(g_vk.dev, (uint32_t)nw, w, 0, NULL);
+    float pc[8] = {(float)rw, (float)rh, (float)ow, (float)oh, reset ? 1.0f : 0.0f, res ? 1.0f : 0.0f};
     vk_full_barrier(cb);
     gp_mark(cb, "ours: DittoSR Net, the network");
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[st]);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &ds, 0, NULL);
     vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 32, pc);
     vkCmdDispatch(cb, (rw + 15) / 16, (rh + 15) / 16, 1);
@@ -5705,8 +5718,8 @@ static TexBackend *gsr2_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mv, 
     pc[16] = ke[0], pc[17] = ke[1], pc[18] = ke[2];
     // (LOCAL experiment, DittoSR Net: the network's corrections into the upscale - e.w = 1, CorrA at binding 3)
     TexBackend *corr = NULL;
-    srnet_corr_b = NULL;
-    if (g_settings.upscaler == UPSCALE_DITTOSR_NET) corr = srnet_run(cb, in, mda, prev, ow, oh, reset), pc[19] = 1;
+    srnet_corr_b = srnet_res = NULL;
+    if (UPSCALE_IS_NET(g_settings.upscaler)) corr = srnet_run(cb, in, mda, prev, ow, oh, reset), pc[19] = 1;
     // (the fast settling: how much of the image changed against its history - x2_change.frag, 4 x 4 R16F, then
     // averaged into 1 x 1)
     TexBackend *chg = post_image_fmt(128, 1, 1, VK_FORMAT_R16_SFLOAT);
@@ -6227,11 +6240,13 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
             float s2 = 2.0f * g_settings.fsr3_sharpness;
             gp_mark(cb, "ours: DittoSR lines, interface");
             TexBackend *c = post_image(47, ow, oh);
-            // (DittoSR Net: the line's strength by the network, c.x = 1 - its CorrB at binding 3)
+            // (DittoSR Net: the line's strength by the network, c.x = 1 - its CorrB at binding 3; the student's
+            // residual c.y = 1, at binding 4, written up to c.zw)
             float pf[12] = {lp[0] * s2, lp[1] * s2, lp[2], ui ? 1.0f : 0.0f, (float)ow, (float)oh, 1.0f / (float)ow, 1.0f / (float)oh,
-                            srnet_corr_b ? 1.0f : 0.0f};
-            VkImageView fi[4] = {v, raw_view(in), ui ? post_view(mt) : raw_view(in), srnet_corr_b ? post_view(srnet_corr_b) : raw_view(in)};
-            post_pass_view(cb, post_pipeline("x2_final.frag"), fi, 4, post_view(c), ow, oh, pf, 48, false, false);
+                            srnet_corr_b ? 1.0f : 0.0f, srnet_res ? 1.0f : 0.0f, (float)srnet_res_w, (float)srnet_res_h};
+            VkImageView fi[5] = {v, raw_view(in), ui ? post_view(mt) : raw_view(in), srnet_corr_b ? post_view(srnet_corr_b) : raw_view(in),
+                                 srnet_res ? post_view(srnet_res) : raw_view(in)};
+            post_pass_view(cb, post_pipeline("x2_final.frag"), fi, 5, post_view(c), ow, oh, pf, 48, false, false);
             v = post_view(c), rb_ = c;
         } else {
             fsr3_engaged = false;
