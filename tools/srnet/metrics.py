@@ -12,7 +12,8 @@ Per upscaler and mode (those measured: Quality 1.5x ... Ultra Performance 3x), a
            (the whole moving frame, the interface's corner left out)
   settle   (when measured) after the game's menu closes (frame 1560): the mean |luma difference| to the settled frame
            (1600) at 1566, 1570 and 1575
-Luma: BT.601, 0..255 (as ffmpeg's gray); the crops as the earlier sessions' scripts.
+Luma: BT.601, 0..255 (as ffmpeg's gray); the crops as the earlier sessions' scripts, at 4K - scaled to the reference's
+width at other sizes (K).
 """
 import os
 import re
@@ -32,8 +33,11 @@ def luma(path):
     return np.rint(0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2])
 
 
+K = 1.0  # (the images' width / 3840: main sets it from the reference)
+
+
 def crop(a, c):
-    x, y, w, h = c
+    x, y, w, h = (int(round(v * K)) for v in c)
     return a[y:y + h, x:x + w]
 
 
@@ -103,7 +107,7 @@ def stability(d):
 
 
 def noise(path):
-    p = luma(path)[:1960]
+    p = luma(path)[:int(1960 * K)]
     cen = p[8:-8, 8:-8]
     wide = np.abs(p[8:-8, 16:] - p[8:-8, :-16]) + np.abs(p[16:, 8:-8] - p[:-16, 8:-8])
     lp = np.abs(4 * cen - p[8:-8, 7:-9] - p[8:-8, 9:-7] - p[7:-9, 8:-8] - p[9:-7, 8:-8])
@@ -116,9 +120,12 @@ MODES = {"quality": "1.5x", "balanced": "1.7x", "performance": "2x", "ultra": "3
 def main():
     out = sys.argv[1]
     names = sys.argv[2:] or ["fsr3", "ditto", "fsr4", "net"]
+    pres = [p for p in MODES if any(os.path.isdir(os.path.join(out, f"r{p}_{n}")) for n in names)]
+    global K
     ref = luma(os.path.join(out, "nat", "window.png"))
+    K = ref.shape[1] / 3840
     print(f"{'mode':5s} {'upscaler':8s} {'upsc ms':>7s} {'frame':>6s} | {'SSIM':>6s} {'PSNR':>6s} {'detail':>7s} | "
-          f"{'fence':>6s} {'all':>6s} | {'noise':>6s}" + (" | settle 1566 1570 1575" if os.path.isdir(os.path.join(out, "rperformance_" + names[0])) else ""))
+          f"{'fence':>6s} {'all':>6s} | {'noise':>6s}" + (" | settle 1566 1570 1575" if pres else ""))
     row = f"{'1x':5s} {'native':8s} {'-':>7s} {frame_ms(os.path.join(out, 'pnat.log')):6.2f} | {1:6.4f} {99:6.2f} {100:6.1f}% | "
     fe, al = stability(os.path.join(out, "nat"))
     print(row + f"{fe:6.3f} {al:6.3f} | {noise(os.path.join(out, 'mnat', 'window.png')):6.2f}")
@@ -145,8 +152,9 @@ def main():
                 row += f"{fe:6.3f} {al:6.3f} | {noise(os.path.join(out, f'm{pre}_{n}', 'window.png')):6.2f}"
                 rr = os.path.join(out, f"r{pre}_{n}")
                 if os.path.isdir(rr):
-                    settled = luma(os.path.join(rr, "fin_1600.png"))[60:1960]
-                    d = {i: np.abs(luma(os.path.join(rr, f"fin_{i}.png"))[60:1960] - settled).mean() for i in (1566, 1570, 1575)}
+                    y0, y1 = int(60 * K), int(1960 * K)
+                    settled = luma(os.path.join(rr, "fin_1600.png"))[y0:y1]
+                    d = {i: np.abs(luma(os.path.join(rr, f"fin_{i}.png"))[y0:y1] - settled).mean() for i in (1566, 1570, 1575)}
                     row += f" |        {d[1566]:4.2f} {d[1570]:4.2f} {d[1575]:4.2f}"
             except (OSError, KeyError, ValueError) as e:
                 row += f"(missing: {e})"
