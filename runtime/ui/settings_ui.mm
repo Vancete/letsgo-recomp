@@ -578,6 +578,7 @@ void ui_page_graphics(float x, bool known) {
         if (ditto || g_settings.upscaler_pick == UPSCALE_DITTO) names[n] = "DittoSR", ids[n++] = UPSCALE_DITTO;
         if (ditto || g_settings.upscaler_pick == UPSCALE_DITTO_EXP) names[n] = "DittoSR Experiment", ids[n++] = UPSCALE_DITTO_EXP;
         names[n] = "DittoSR Experiment 2", ids[n++] = UPSCALE_DITTO_EXP2;  // (local experiment: GSR 2 based, no data needed)
+        names[n] = "Experiment 2 Net", ids[n++] = UPSCALE_X2_NET;  // (local experiment: Experiment 2 + our tiny network)
         for (int i = 0; i < n; i++) if (ids[i] == g_settings.upscaler_pick) cur = i;
         ui_row(l[8], x);
         if (ui_combo("##upscaler", &cur, names, n)) g_settings.upscaler_pick = ids[cur], settings_apply_levels();

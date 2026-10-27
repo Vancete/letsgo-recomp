@@ -186,6 +186,7 @@ static void create_device(void) {
     if (g_vk.divisor) ext[n_ext++] = VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME;
     g_vk.host_import = has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);  // guest heap as a GPU buffer (exec.c)
     if (g_vk.host_import) ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
+    g_vk.shader_f16 = have12.shaderFloat16;
 #ifdef __ANDROID__  // (no host memory import there: the heap goes into GPU memory instead, exec.c renderer_share_heap;
     // its memory pools are reached by shaders through buffer device addresses)
     g_vk.heap_export = !g_vk.host_import && have12.bufferDeviceAddress;

@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 
 #include "shaders.h"
+#include "srnet_weights.h"  // (LOCAL experiment, Experiment 2 Net: srnet.comp)
 
 void vk_shaders_init(void) {  // (compilers are per thread: check shaderc works at all)
     shaderc_compiler_t c = shaderc_compiler_initialize();
@@ -1281,6 +1282,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(set = 0, binding = 0) uniform sampler2D PrevOutput;\n"
                "layout(set = 0, binding = 1) uniform sampler2D MotionDepthClip;\n"
                "layout(set = 0, binding = 2) uniform sampler2D InputColor;\n"
+               "layout(set = 0, binding = 3) uniform sampler2D CorrA;\n"
                "vec3 ycc(vec3 c) { return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * (c.r - c.b), 0.5 * c.g - 0.25 * (c.r + c.b)); }\n"
                "vec3 rgb(vec3 y) { return vec3(y.x + y.y - y.z, y.x + y.z, y.x - y.y - y.z); }\n"
                "vec3 hist(vec2 uv) {\n"  // (Catmull-Rom in 5 bilinear taps)
@@ -1314,6 +1316,9 @@ static const char *builtin_src(const char *name, int *stage) {
                "  float g = length(vec2(gx, gy)), es = clamp(g / (4.0 * (lmx - lmn) + 1e-3), 0.0, 1.0);\n"
                "  vec2 nrm = g > 1e-5 ? vec2(gx, gy) / g : vec2(1.0, 0.0);\n"
                "  float along = 1.0 - 0.75 * pc.e.y * es;\n"
+               // (Experiment 2 Net, e.w = 1: the network's corrections - srnet.comp's, at the render size)
+               "  vec4 cn = pc.e.w > 0.5 ? textureLod(CorrA, uv, 0.0) : vec4(0.0);\n"
+               "  if (pc.e.w > 0.5) { ks *= exp(0.5 * cn.x); along = clamp(along * exp(cn.y), 0.05, 4.0); }\n"
                // the thin line (e.z): the centre sample a local extreme of its 3x3 - a lash, an eyebrow
                "  float omn = 1.0, omx = 0.0;\n"
                "  for (int i = 0; i < 9; i++) if (i != 4) { omn = min(omn, l[i]); omx = max(omx, l[i]); }\n"
@@ -1343,7 +1348,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "  vec3 hy = ycc(hist(puv));\n"
                "  float rest = pc.d.w > 0.0 ? pc.d.w : 1.5;\n"
                "  float gam = mix(rest, 0.9, clamp(mlen * 0.25, 0.0, 1.0)) * (1.0 - 0.5 * mda.z);\n"
-               "  gam = mix(gam, 1.5 * rest, lockf);\n"
+               "  gam = mix(gam, 1.5 * rest, lockf) * exp(cn.z);\n"
                "  vec3 dir = hy - m1, ext3 = gam * sig + vec3(1.0 / 255.0);\n"
                "  vec3 ad = abs(dir) / ext3;\n"
                "  float t = max(ad.x, max(ad.y, ad.z));\n"
@@ -1353,6 +1358,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "  a = mix(a, 0.6, mda.z);\n"
                // the reaction (e.x): the history outside the samples' range by t - something changed - the new frame by it
                "  a = mix(a, 0.5, clamp((t - 1.0) * pc.e.x, 0.0, 1.0) * (1.0 - lockf));\n"
+               "  if (pc.e.w > 0.5) { float ac = clamp(a, 1e-3, 1.0 - 1e-3); a = 1.0 / (1.0 + exp(-(log(ac / (1.0 - ac)) + cn.w))); }\n"
                "  o = vec4(mix(rgb(hy), cur, clamp(a, 0.0, 1.0)), 1.0);\n"
                "}\n";
     }
@@ -1457,10 +1463,11 @@ static const char *builtin_src(const char *name, int *stage) {
     if (!strcmp(name, "x2_final.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"
-               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; } pc;\n"
                "layout(set = 0, binding = 0) uniform sampler2D t0;\n"
                "layout(set = 0, binding = 1) uniform sampler2D t1;\n"
                "layout(set = 0, binding = 2) uniform sampler2D m;\n"
+               "layout(set = 0, binding = 3) uniform sampler2D CorrB;\n"
                "layout(location = 0) out vec4 o;\n"
                "vec3 tap(ivec2 p) { return texelFetch(t0, clamp(p, ivec2(0), ivec2(pc.b.xy) - 1), 0).rgb; }\n"
                "vec3 cr(vec2 uv) {\n"
@@ -1480,14 +1487,103 @@ static const char *builtin_src(const char *name, int *stage) {
                "  vec3 d = tap(ip + ivec2(-1, 0)), e = tap(ip), f = tap(ip + ivec2(1, 0));\n"
                "  vec3 g = tap(ip + ivec2(-1, 1)), h = tap(ip + ivec2(0, 1)), i = tap(ip + ivec2(1, 1));\n"
                "  vec3 blur = (4.0 * e + 2.0 * (b + d + f + h) + (a + c + g + i)) / 16.0, det = e - blur;\n"
-               "  vec3 r = e + (dot(det, vec3(0.25, 0.5, 0.25)) < 0.0 ? pc.a.x : pc.a.y) * det;\n"
+               "  vec2 uv = gl_FragCoord.xy * pc.b.zw;\n"
+               // (Experiment 2 Net, c.x = 1: the line's strength by the network - srnet.comp's CorrB.x)
+               "  float ls = pc.c.x > 0.5 ? exp(textureLod(CorrB, uv, 0.0).x) : 1.0;\n"
+               "  vec3 r = e + (dot(det, vec3(0.25, 0.5, 0.25)) < 0.0 ? pc.a.x : pc.a.y) * ls * det;\n"
                "  vec3 mn = min(min(min(a, b), min(c, d)), min(min(e, f), min(min(g, h), i)));\n"
                "  vec3 mx = max(max(max(a, b), max(c, d)), max(max(e, f), max(max(g, h), i)));\n"
                "  r = clamp(r, max(mn - pc.a.z * (mx - mn), 0.0), mx);\n"
-               "  vec2 uv = gl_FragCoord.xy * pc.b.zw;\n"
                "  float k = pc.a.w > 0.5 ? texture(m, uv).r : 0.0;\n"
                "  o = vec4(k > 0.0 ? mix(r, cr(uv), k) : r, 1.0);\n"
                "}\n";
+    }
+    // ---- LOCAL experiment, Experiment 2 Net (exec.c srnet_run, UPSCALE_X2_NET): the tiny network of tools/srnet (3895
+    // parameters, srnet_weights.h; trained on our own captures) at the render size, one compute pass: a 16 x 16 tile, its
+    // inputs over a 2-pixel border and its first layer over a 1-pixel border in shared memory (zero off the image, as
+    // the training's padding). Inputs per render pixel: the colour (YCoCg), the depth clip and the motion (log of its
+    // length in output pixels) from gsr2_convert's (t1: xy = 2 x motion, z = clip), the history (the previous upscale,
+    // t2) at this pixel's previous place minus the colour, and the network's state (t3, the previous CorrB's yz) there;
+    // none on a reset (b.x). Out: CorrA = the corrections of x2_upscale.frag (the kernel's width, its stretch along
+    // edges, the clip box's width, the history's weight - 2 tanh(x / 2) each), CorrB = x2_final.frag's line strength
+    // and the next state (tanh). a.xy = render size, a.zw = output size.
+    // srnet16.comp: the same in half precision (the shared tiles and the arithmetic, two output channels a vec2: packed
+    // FP16 where the GPU has it - exec.c picks it with shaderFloat16). The layers are straight-line code with the weights
+    // as literals (srnet_weights.h): indexed in loops they went to memory (3 ms at 1280 x 720 in FP32, 20 in FP16).
+    if (!strcmp(name, "srnet.comp") || !strcmp(name, "srnet16.comp")) {
+        *stage = STAGE_COMPUTE;
+        static char *src[2];
+        int k16 = !strcmp(name, "srnet16.comp");
+        if (!src[k16]) {
+            static const char *head =
+                "#version 450\n"
+                "layout(local_size_x = 16, local_size_y = 16) in;\n"
+                "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+                "layout(set = 0, binding = 0) uniform sampler2D Color;\n"
+                "layout(set = 0, binding = 1) uniform sampler2D Mda;\n"
+                "layout(set = 0, binding = 2) uniform sampler2D Hist;\n"
+                "layout(set = 0, binding = 3) uniform sampler2D StatePrev;\n"
+                "layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D CorrA;\n"
+                "layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D CorrB;\n";
+            static const char *t32 = "#define T float\n#define V2 vec2\n";
+            static const char *t16 = "#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require\n"
+                                     "#define T float16_t\n#define V2 f16vec2\n";
+            static const char *b1 =
+                "shared T F[10][400];\n"
+                "shared T L[16][324];\n"
+                "vec3 ycc(vec3 c) { return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * (c.r - c.b), 0.5 * c.g - 0.25 * (c.r + c.b)); }\n"
+                "void main() {\n"
+                "  ivec2 rs = ivec2(pc.a.xy), base = ivec2(gl_WorkGroupID.xy) * 16;\n"
+                "  uint li = gl_LocalInvocationIndex;\n"
+                "  for (uint k = li; k < 400u; k += 256u) {\n"
+                "    ivec2 p = base + ivec2(int(k % 20u), int(k / 20u)) - 2;\n"
+                "    float f[10] = float[](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);\n"
+                "    if (all(greaterThanEqual(p, ivec2(0))) && all(lessThan(p, rs))) {\n"
+                "      vec3 yc = ycc(texelFetch(Color, p, 0).rgb);\n"
+                "      vec3 m = texelFetch(Mda, p, 0).xyz;\n"
+                "      vec2 mv = 0.5 * m.xy, puv = (vec2(p) + 0.5) / pc.a.xy - mv;\n"
+                "      f[0] = yc.x; f[1] = yc.y; f[2] = yc.z; f[3] = m.z; f[4] = log(1.0 + length(mv * pc.a.zw));\n"
+                "      if (pc.b.x < 0.5) {\n"
+                "        vec3 hy = ycc(textureLod(Hist, puv, 0.0).rgb) - yc;\n"
+                "        vec2 st = textureLod(StatePrev, puv, 0.0).yz;\n"
+                "        f[5] = hy.x; f[6] = hy.y; f[7] = hy.z; f[8] = st.x; f[9] = st.y;\n"
+                "      }\n"
+                "    }\n"
+                "    for (int i = 0; i < 10; i++) F[i][k] = T(f[i]);\n"
+                "  }\n"
+                "  barrier();\n"
+                "  for (uint k = li; k < 324u; k += 256u) {\n"
+                "    ivec2 q = ivec2(int(k % 18u), int(k / 18u)), p = base + q - 1;\n"
+                "    int fi = q.y * 20 + q.x;\n";
+            static const char *b2 =
+                "    bool in_ = all(greaterThanEqual(p, ivec2(0))) && all(lessThan(p, rs));\n"
+                "    V2 z = V2(0.0);\n"
+                "    a0 = in_ ? max(a0, z) : z; a1 = in_ ? max(a1, z) : z; a2 = in_ ? max(a2, z) : z; a3 = in_ ? max(a3, z) : z;\n"
+                "    a4 = in_ ? max(a4, z) : z; a5 = in_ ? max(a5, z) : z; a6 = in_ ? max(a6, z) : z; a7 = in_ ? max(a7, z) : z;\n"
+                "    L[0][k] = a0.x; L[1][k] = a0.y; L[2][k] = a1.x; L[3][k] = a1.y; L[4][k] = a2.x; L[5][k] = a2.y;\n"
+                "    L[6][k] = a3.x; L[7][k] = a3.y; L[8][k] = a4.x; L[9][k] = a4.y; L[10][k] = a5.x; L[11][k] = a5.y;\n"
+                "    L[12][k] = a6.x; L[13][k] = a6.y; L[14][k] = a7.x; L[15][k] = a7.y;\n"
+                "  }\n"
+                "  barrier();\n"
+                "  ivec2 lp = ivec2(gl_LocalInvocationID.xy), p = base + lp;\n"
+                "  if (any(greaterThanEqual(p, rs))) return;\n"
+                "  int li2 = lp.y * 18 + lp.x;\n";
+            static const char *b3 =
+                "  V2 z = V2(0.0);\n"
+                "  vec2 d0 = vec2(max(c0, z)), d1 = vec2(max(c1, z)), d2 = vec2(max(c2, z)), d3 = vec2(max(c3, z));\n"
+                "  vec2 d4 = vec2(max(c4, z)), d5 = vec2(max(c5, z)), d6 = vec2(max(c6, z)), d7 = vec2(max(c7, z));\n";
+            static const char *b4 =
+                "  imageStore(CorrA, p, 2.0 * tanh(0.5 * vec4(r0, r1, r2, r3)));\n"
+                "  imageStore(CorrB, p, vec4(2.0 * tanh(0.5 * r4), tanh(r5), tanh(r6), 0.0));\n"
+                "}\n";
+            const char *parts[] = {head, k16 ? t16 : t32, b1, srnet_l1_glsl, b2, srnet_l2_glsl, b3, srnet_l3_glsl, b4};
+            size_t n = 1;
+            for (int i = 0; i < 9; i++) n += strlen(parts[i]);
+            src[k16] = malloc(n);
+            src[k16][0] = 0;
+            for (int i = 0; i < 9; i++) strcat(src[k16], parts[i]);
+        }
+        return src[k16];
     }
     // ---- LOCAL research, the tiny network's training pairs (exec.c srcap_run, LARECOMP_SRCAP): from one image rendered
     // at K x the output (no jitter), a.x = what: 0 the reference (a K x K box, a.y = K; alpha the interface mask's

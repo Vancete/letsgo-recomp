@@ -19,8 +19,10 @@ enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25
 // DITTO: DittoSR, a local test upscaler with FSR 3.1's inputs (runtime/nvn/vulkan/fsr3.cpp dittosr_*), FSR 1 without it
 enum { UPSCALE_BILINEAR = 0, UPSCALE_FSR1 = 2 /* AMD FSR 1 */, UPSCALE_FSR3 = 3, UPSCALE_GSR = 4, UPSCALE_GSR2 = 5, UPSCALE_DITTO = 6,
        UPSCALE_DITTO_EXP = 7 /* (local experiment: DittoSR's cheaper variants, ditto_sr.h) */,
-       UPSCALE_DITTO_EXP2 = 8 /* (local experiment: GSR 2's scaffolding, passes of our own - exec.c gsr2_run) */ };
-#define UPSCALE_IS_GSR2(u) ((u) == UPSCALE_GSR2 || (u) == UPSCALE_DITTO_EXP2)
+       UPSCALE_DITTO_EXP2 = 8 /* (local experiment: GSR 2's scaffolding, passes of our own - exec.c gsr2_run) */,
+       UPSCALE_X2_NET = 9 /* (local experiment: Experiment 2 with our tiny network - exec.c srnet_run, tools/srnet) */ };
+#define UPSCALE_IS_X2(u) ((u) == UPSCALE_DITTO_EXP2 || (u) == UPSCALE_X2_NET)
+#define UPSCALE_IS_GSR2(u) ((u) == UPSCALE_GSR2 || UPSCALE_IS_X2(u))
 #define UPSCALE_IS_DITTO(u) ((u) == UPSCALE_DITTO || (u) == UPSCALE_DITTO_EXP)
 // the temporal upscalers: they anti-alias the image themselves (the anti-aliasing setting is set aside) and take a mode
 // (fsr3_preset) for the render resolution

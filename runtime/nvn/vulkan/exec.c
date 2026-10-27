@@ -398,9 +398,10 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
             if (s->npools == 16) FATAL("descriptor pools exhausted\n");
             VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
                                             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32768},
-                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024}};
+                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
+                                            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024}};  // (storage images: srnet_run)
             VkDescriptorPoolCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 8192,
-                                             .poolSizeCount = 5, .pPoolSizes = sizes};
+                                             .poolSizeCount = 6, .pPoolSizes = sizes};
             VK_CHECK(vkCreateDescriptorPool(g_vk.dev, &ci, NULL, &s->pools[s->npools++]));
         }
         VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -4899,7 +4900,8 @@ static VkPipeline post_pipeline(const char *fs) { return post_pipeline_ex(fs, VK
 // composited after it, 38, 39: the GI-size distance (R16, log2) and normals (gi_run). The in-between images at a
 // reduced size (vk_tex_lo_begin) have a set of their own (64 on). 40-46: the optical flow's (flow_*), 47: GSR 2's output
 // sharpened, its interface after it, 50: its motion and depth clip (render size, RGBA16F), 51, 52: its history (output
-// size, ping-pong: gsr2_run):
+// size, ping-pong: gsr2_run), 53, 61, 62: Experiment 2 Net's corrections and state (srnet_run), 54-60: the training
+// captures (srcap_run) - local:
 // sized for them, they were made again at every switch between a real frame and an in-between image, and the real
 // frames' histories (SSAO, GI, TAA) went with them.
 static TexBackend *post_image_fmt(int i, uint32_t w, uint32_t h, VkFormat fmt) {
@@ -4916,7 +4918,8 @@ static TexBackend *post_image_fmt(int i, uint32_t w, uint32_t h, VkFormat fmt) {
                                 .format = fmt, .extent = {w, h, 1}, .mipLevels = 1, .arrayLayers = 1,
                                 .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
                                 .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
-        if (i == 24 || i == 48) ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;  // (FSR 3 writes its output from compute; 48: DittoSR Experiment's, local)
+        // (FSR 3 writes its output from compute; 48: DittoSR Experiment's, 53, 61, 62: Experiment 2 Net's - local)
+        if (i == 24 || i == 48 || i == 53 || i == 61 || i == 62) ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &d->image, &d->mem, NULL));
         d->format = fmt; d->width = w; d->height = h; d->depth = 1; d->layers = 1; d->levels = 1;
@@ -5584,6 +5587,67 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
 // image upscaled against the previous output moved along the motion (output size, a ping-pong history gamma-encoded as
 // the image, 10 bits a channel: in RGBA16F its reads and writes took 2.5 ms of an Adreno 830's frame at 2133 x 1200).
 // in: the image (render size, jittered by taa_jitter), mv: the motion vectors.
+// LOCAL experiment, Experiment 2 Net (UPSCALE_X2_NET): our tiny network (tools/srnet, shaders.c srnet.comp) at the render
+// size, after gsr2_convert and before x2_upscale.frag - one compute pass. Its inputs: the colour, the convert pass's
+// (mda), the previous upscale (prev) and its own previous state; out: CorrA (post image 53: x2_upscale.frag's
+// corrections) and CorrB (61 / 62 ping-pong: x2_final.frag's line strength and the state for the next frame), both
+// RGBA16F at the render size. srnet_corr_b: this frame's CorrB, for the final pass.
+static TexBackend *srnet_corr_b;
+static TexBackend *srnet_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mda, TexBackend *prev, uint32_t ow, uint32_t oh,
+                             bool reset) {
+    static VkDescriptorSetLayout dsl;
+    static VkPipelineLayout layout;
+    static VkPipeline pipe;
+    static int cur;
+    if (!pipe) {
+        VkDescriptorSetLayoutBinding b[6];
+        for (uint32_t i = 0; i < 6; i++)
+            b[i] = (VkDescriptorSetLayoutBinding){i, i < 4 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
+                                                  VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+        VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 6, .pBindings = b};
+        VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &dsl));
+        VkPushConstantRange r = {VK_SHADER_STAGE_COMPUTE_BIT, 0, 32};
+        VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl,
+                                         .pushConstantRangeCount = 1, .pPushConstantRanges = &r};
+        VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &ci, NULL, &layout));
+        // (in half precision where the GPU has it: LARECOMP_SRNET_FP16=0 keeps it in single)
+        bool f16 = g_vk.shader_f16 && !(getenv("LARECOMP_SRNET_FP16") && !atoi(getenv("LARECOMP_SRNET_FP16")));
+        LOG("[srnet] the network in %s precision\n", f16 ? "half" : "single");
+        VkComputePipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                                          .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                                                    .module = vk_builtin_shader(f16 ? "srnet16.comp" : "srnet.comp"), .pName = "main"},
+                                          .layout = layout};
+        VK_CHECK(vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pipe));
+    }
+    uint32_t rw = in->width, rh = in->height;
+    TexBackend *sp = post_image_fmt(61 + cur, rw, rh, VK_FORMAT_R16G16B16A16_SFLOAT);  // (the previous state)
+    cur ^= 1;
+    TexBackend *ca = post_image_fmt(53, rw, rh, VK_FORMAT_R16G16B16A16_SFLOAT);
+    TexBackend *cb_ = post_image_fmt(61 + cur, rw, rh, VK_FORMAT_R16G16B16A16_SFLOAT);
+    VkDescriptorSet ds = vk_alloc_set(dsl);
+    VkImageView v[6] = {raw_view(in), post_view(mda), post_view(prev), post_view(sp), post_view(ca), post_view(cb_)};
+    VkDescriptorImageInfo ii[6];
+    VkWriteDescriptorSet w[6];
+    for (int i = 0; i < 6; i++) {
+        ii[i] = (VkDescriptorImageInfo){i < 4 ? vk_default_sampler(true) : VK_NULL_HANDLE, v[i], VK_IMAGE_LAYOUT_GENERAL};
+        w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = (uint32_t)i,
+                                      .descriptorCount = 1,
+                                      .descriptorType = i < 4 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                      .pImageInfo = &ii[i]};
+    }
+    vkUpdateDescriptorSets(g_vk.dev, 6, w, 0, NULL);
+    float pc[8] = {(float)rw, (float)rh, (float)ow, (float)oh, reset ? 1.0f : 0.0f};
+    vk_full_barrier(cb);
+    gp_mark(cb, "ours: Experiment 2 Net, the network");
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &ds, 0, NULL);
+    vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 32, pc);
+    vkCmdDispatch(cb, (rw + 15) / 16, (rh + 15) / 16, 1);
+    vk_full_barrier(cb);
+    srnet_corr_b = cb_;
+    return ca;
+}
+
 static TexBackend *gsr2_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mv, uint32_t ow, uint32_t oh) {
     static int cur;
     static uint32_t still, hw, hh;  // (the frames the camera has stood still; the history's size)
@@ -5613,7 +5677,7 @@ static TexBackend *gsr2_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mv, 
                    64, false, false);
     // (LOCAL experiment, DittoSR Experiment 2: its knobs into the upscale's constants only, after the convert pass - it
     // reads d.x as the field of view: 0 there marked every pixel's depth as standing out, the history all but unused)
-    bool x2 = g_settings.upscaler == UPSCALE_DITTO_EXP2;
+    bool x2 = UPSCALE_IS_X2(g_settings.upscaler);
     // (its mode: 0 x2_upscale.frag, our reconstruction; 1 x2b_upscale.frag, GSR 2's upscale against its pattern -
     // LARECOMP_EXP2_MODE; mode 1 takes GSR 2's parameters as they are)
     static int x2m = -1;
@@ -5652,9 +5716,13 @@ static TexBackend *gsr2_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mv, 
         }
         pc[12] = kb[0], pc[15] = kb[1];
     }
-    VkImageView ui[3] = {post_view(prev), post_view(mda), raw_view(in)};
+    // (LOCAL experiment, Experiment 2 Net: the network's corrections into the upscale - e.w = 1, CorrA at binding 3)
+    TexBackend *corr = NULL;
+    srnet_corr_b = NULL;
+    if (x2 && x2m == 0 && g_settings.upscaler == UPSCALE_X2_NET) corr = srnet_run(cb, in, mda, prev, ow, oh, reset), pc[19] = 1;
+    VkImageView ui[4] = {post_view(prev), post_view(mda), raw_view(in), corr ? post_view(corr) : raw_view(in)};
     gp_mark(cb, "ours: GSR 2 upscale");
-    post_pass_view(cb, post_pipeline_ex(!x2 ? "gsr2_upscale.frag" : x2m == 1 ? "x2b_upscale.frag" : "x2_upscale.frag", hf, 0), ui, 3, post_view(out), ow, oh, pc,
+    post_pass_view(cb, post_pipeline_ex(!x2 ? "gsr2_upscale.frag" : x2m == 1 ? "x2b_upscale.frag" : "x2_upscale.frag", hf, 0), ui, 4, post_view(out), ow, oh, pc,
                    x2 && x2m == 0 ? 80 : 64, false, false);
     return out;
 }
@@ -5735,7 +5803,7 @@ static void srcap_run(VkCommandBuffer cb, TexBackend *b, TexBackend *mv, TexBack
     VkImageView dv = vk_image_view(ao.depth, VK_IMAGE_VIEW_TYPE_2D, ao.depth->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
     VkImageView src[4] = {raw_view(b), dv, post_view(mv), mask ? post_view(mask) : raw_view(b)};
     float hm = mask ? 1.0f : 0.0f;
-    // (54: the reference; 55-57 at 2x, 58-60 at 3x: colour, depth, motion - free slots, 53-63 unused elsewhere)
+    // (54: the reference; 55-57 at 2x, 58-60 at 3x: colour, depth, motion - free slots: 53, 61, 62 are srnet_run's)
     TexBackend *img[7];
     uint32_t iw[7], ih[7], bpp[7] = {4, 4, 4, 4, 4, 4, 4};
     img[0] = post_image(54, ow, oh), iw[0] = ow, ih[0] = oh;
@@ -5850,7 +5918,7 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
         // (LOCAL experiment, DittoSR Experiment 2: its own floor, LARECOMP_EXP2_MIPMIN - at 3x the ratio asks -2.6)
         static float x2mip = 1;
         if (x2mip > 0) x2mip = getenv("LARECOMP_EXP2_MIPMIN") ? (float)atof(getenv("LARECOMP_EXP2_MIPMIN")) : -2.6f;
-        float mlo = g_settings.upscaler == UPSCALE_DITTO_EXP2 ? x2mip : -2.0f;
+        float mlo = UPSCALE_IS_X2(g_settings.upscaler) ? x2mip : -2.0f;
         mb = mb < mlo ? mlo : mb > 0 ? 0 : mb;
         // (LOCAL research, the training pairs: the large image's own bias + LARECOMP_SRCAP_MIP - srcap_run)
         static float capmip = -100;
@@ -5995,7 +6063,7 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
             static int midline = -1;
             if (midline < 0) midline = getenv("LARECOMP_DITTO_EXP_MIDLINE") ? atoi(getenv("LARECOMP_DITTO_EXP_MIDLINE")) : 1;
             // (DittoSR Experiment 2 too, its own strengths: LARECOMP_EXP2_MIDLINE_P)
-            bool x2l = g_settings.upscaler == UPSCALE_DITTO_EXP2;
+            bool x2l = UPSCALE_IS_X2(g_settings.upscaler);
             bool exp_line = midline > 0 && (x2l || (g_settings.upscaler == UPSCALE_DITTO_EXP && dittosr_exp_line()[0] > 0));
             if (g_settings.fsr3_sharpness > 0.01f && !(exp_line && midline == 1)) {
                 TexBackend *r = post_image(31, ow, oh);
@@ -6096,7 +6164,7 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
             static int uic = -1;
             if (uic < 0) uic = getenv("LARECOMP_FSR3_UI_COMPOSITE") ? atoi(getenv("LARECOMP_FSR3_UI_COMPOSITE")) : 1;
             bool ui = uic && mt, sharp = g_settings.fsr3_sharpness > 0.01f;
-            if (g_settings.upscaler == UPSCALE_DITTO_EXP2) {
+            if (UPSCALE_IS_X2(g_settings.upscaler)) {
                 // (LOCAL experiment, DittoSR Experiment 2: the line pass and the interface in one pass, x2_final.frag - the
                 // line's strengths LARECOMP_EXP2_LINE=<dark>,<light>,<below>, the dark and light ones x 2 x the slider)
                 static float lp[3] = {-1, 0, 0};
@@ -6107,9 +6175,11 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
                 float s2 = 2.0f * g_settings.fsr3_sharpness;
                 gp_mark(cb, "ours: GSR 2 sharpening, interface");
                 TexBackend *c = post_image(47, ow, oh);
-                float pf[8] = {lp[0] * s2, lp[1] * s2, lp[2], ui ? 1.0f : 0.0f, (float)ow, (float)oh, 1.0f / (float)ow, 1.0f / (float)oh};
-                VkImageView fi[3] = {v, raw_view(in), ui ? post_view(mt) : raw_view(in)};
-                post_pass_view(cb, post_pipeline("x2_final.frag"), fi, 3, post_view(c), ow, oh, pf, 32, false, false);
+                // (Experiment 2 Net: the line's strength by the network, c.x = 1 - its CorrB at binding 3)
+                float pf[12] = {lp[0] * s2, lp[1] * s2, lp[2], ui ? 1.0f : 0.0f, (float)ow, (float)oh, 1.0f / (float)ow, 1.0f / (float)oh,
+                                srnet_corr_b ? 1.0f : 0.0f};
+                VkImageView fi[4] = {v, raw_view(in), ui ? post_view(mt) : raw_view(in), srnet_corr_b ? post_view(srnet_corr_b) : raw_view(in)};
+                post_pass_view(cb, post_pipeline("x2_final.frag"), fi, 4, post_view(c), ow, oh, pf, 48, false, false);
                 v = post_view(c), rb_ = c;
             } else if (ui || sharp) {
                 gp_mark(cb, "ours: GSR 2 sharpening, interface");

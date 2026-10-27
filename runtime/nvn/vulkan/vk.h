@@ -36,6 +36,7 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import;
+    bool shader_f16;   // half-precision arithmetic in shaders (shaderFloat16: Experiment 2 Net's srnet16.comp, local)
     bool heap_export;  // the guest heap's start in exported GPU memory mapped there (Android: exec.c renderer_share_heap)
     // window
     VkSurfaceKHR surface;
