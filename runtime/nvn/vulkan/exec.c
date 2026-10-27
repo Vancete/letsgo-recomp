@@ -5658,6 +5658,147 @@ static TexBackend *gsr2_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mv, 
                    x2 && x2m == 0 ? 80 : 64, false, false);
     return out;
 }
+// ---- LOCAL research: the tiny network's training pairs (tools/srnet). LARECOMP_SRCAP=<folder>, with the game rendered
+// at 4 x the window (LARECOMP_SCALE=4, a 1920 x 1080 window: 7680 x 4320) and no upscale: each real frame (from
+// LARECOMP_SRCAP_FROM to _TO, presents) -> <folder>/f<present>.bin, the reference (a 4 x 4 box down to the window's
+// size, 16 samples a pixel) and for 2x and 3x the low-resolution image the game would have rendered with this frame's
+// jitter (GSR 2's Halton sequence for the ratio), each pixel a point sample of the large image - colour, depth, motion
+// vectors and the interface mask from one image, so they agree exactly. The textures' mip bias is the large image's
+// + LARECOMP_SRCAP_MIP (1: then the low-resolution images see the mips Experiment 2's bias gives them). Read back three
+// frames late (a ring of buffers) and written by a thread of its own: the game keeps its pace.
+// File: "SRC1", u32 present, u32 ow, oh, f32 proj[4]; per ratio (2, 3): u32 w, h, f32 jitter x, y; then the planes:
+// the reference RGBA8 (alpha: the mask's share), per ratio colour RGBA8 (alpha: mask), depth R32F, motion RG16F.
+static const char *srcap_dir(void) {
+    static const char *d = (const char *)1;
+    if (d == (const char *)1) d = getenv("LARECOMP_SRCAP");
+    return d;
+}
+typedef struct { uint8_t *data; size_t size; uint64_t present; } SrcapJob;
+static SrcapJob srcap_q[64];
+static int srcap_qn;
+static pthread_mutex_t srcap_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t srcap_cv = PTHREAD_COND_INITIALIZER;
+static void *srcap_writer(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&srcap_mu);
+        while (!srcap_qn) pthread_cond_wait(&srcap_cv, &srcap_mu);
+        SrcapJob j = srcap_q[0];
+        memmove(srcap_q, srcap_q + 1, (size_t)(--srcap_qn) * sizeof *srcap_q);
+        pthread_cond_broadcast(&srcap_cv);
+        pthread_mutex_unlock(&srcap_mu);
+        char path[1024];
+        snprintf(path, sizeof path, "%s/f%06llu.bin", srcap_dir(), (unsigned long long)j.present);
+        FILE *f = fopen(path, "wb");
+        if (f) { fwrite(j.data, 1, j.size, f); fclose(f); }
+        else LOG("[srcap] %s: cannot write\n", path);
+        free(j.data);
+    }
+    return NULL;
+}
+static void srcap_run(VkCommandBuffer cb, TexBackend *b, TexBackend *mv, TexBackend *mask, uint32_t ow, uint32_t oh) {
+    static long from = -2, to;
+    if (from == -2) {
+        from = getenv("LARECOMP_SRCAP_FROM") ? atol(getenv("LARECOMP_SRCAP_FROM")) : 0;
+        to = getenv("LARECOMP_SRCAP_TO") ? atol(getenv("LARECOMP_SRCAP_TO")) : 1L << 30;
+        pthread_t t;
+        pthread_create(&t, NULL, srcap_writer, NULL);
+        pthread_detach(t);
+    }
+    // the ring: a slot recorded three frames ago is done (or waited for), handed to the writer
+    enum { RING = 3 };
+    static struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t cap, seq, present; size_t size; bool full; } ring[RING];
+    static int slot;
+    uint64_t pc_ = renderer_present_count();
+    bool done = (long)pc_ > to;  // (past the last: whatever is left)
+    for (int i = 0; i < RING; i++) {
+        if (!ring[i].full || (i != slot && !done)) continue;
+        vk_wait_seq(ring[i].seq);
+        uint8_t *copy = malloc(ring[i].size);
+        memcpy(copy, ring[i].ptr, ring[i].size);
+        pthread_mutex_lock(&srcap_mu);
+        while (srcap_qn >= 64) pthread_cond_wait(&srcap_cv, &srcap_mu);  // (the disk behind: the game waits)
+        srcap_q[srcap_qn++] = (SrcapJob){copy, ring[i].size, ring[i].present};
+        pthread_cond_broadcast(&srcap_cv);
+        pthread_mutex_unlock(&srcap_mu);
+        ring[i].full = false;
+    }
+    if ((long)pc_ < from || (long)pc_ > to) return;
+    uint32_t k = b->width / ow;
+    if (k < 2 || b->width != ow * k || b->height != oh * k) {
+        static bool warned;
+        if (!warned) warned = true, LOG("[srcap] the image %ux%u is not a whole multiple of the window's %ux%u\n", b->width, b->height, ow, oh);
+        return;
+    }
+    static const char *fs = "srcap.frag";
+    static const VkComponentMapping id = {0};
+    VkImageView dv = vk_image_view(ao.depth, VK_IMAGE_VIEW_TYPE_2D, ao.depth->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
+    VkImageView src[4] = {raw_view(b), dv, post_view(mv), mask ? post_view(mask) : raw_view(b)};
+    float hm = mask ? 1.0f : 0.0f;
+    // (54: the reference; 55-57 at 2x, 58-60 at 3x: colour, depth, motion - free slots, 53-63 unused elsewhere)
+    TexBackend *img[7];
+    uint32_t iw[7], ih[7], bpp[7] = {4, 4, 4, 4, 4, 4, 4};
+    img[0] = post_image(54, ow, oh), iw[0] = ow, ih[0] = oh;
+    float jit[2][2];
+    uint8_t hdr[64] = {0};
+    memcpy(hdr, "SRC1", 4);
+    uint32_t h32[3] = {(uint32_t)pc_, ow, oh};
+    memcpy(hdr + 4, h32, 12);
+    memcpy(hdr + 16, ao.proj, 16);
+    for (int r = 0; r < 2; r++) {
+        uint32_t ratio = 2 + r, lw = ow / ratio, lh = oh / ratio;
+        uint32_t phases = (uint32_t)ceilf(8.0f * (float)(ratio * ratio)), ph = (uint32_t)(pc_ % phases) + 1;
+        // (the jitter where the large image has a pixel centre: kept as it was sampled)
+        float lk = (float)b->width / (float)lw;
+        for (int a = 0; a < 2; a++) {
+            float j = halton(ph, a ? 3 : 2) - 0.5f;
+            jit[r][a] = 0.5f - (floorf((0.5f - j) * lk) + 0.5f) / lk;
+        }
+        img[1 + 3 * r] = post_image(55 + 3 * r, lw, lh);
+        img[2 + 3 * r] = post_image_fmt(56 + 3 * r, lw, lh, VK_FORMAT_R32_SFLOAT);
+        img[3 + 3 * r] = post_image_fmt(57 + 3 * r, lw, lh, VK_FORMAT_R16G16_SFLOAT);
+        for (int i = 1; i <= 3; i++) iw[i + 3 * r] = lw, ih[i + 3 * r] = lh;
+        uint32_t hh[2] = {lw, lh};
+        memcpy(hdr + 32 + 16 * r, hh, 8);
+        memcpy(hdr + 40 + 16 * r, jit[r], 8);
+    }
+    VkFormat fmts[4] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R16G16_SFLOAT};
+    VkPipeline pipes[4];
+    for (int i = 0; i < 4; i++) pipes[i] = post_pipeline_ex(fs, fmts[i], 0);
+    float p0[8] = {0, (float)k, 0, 0, hm};
+    post_pass_view(cb, pipes[0], src, 4, post_view(img[0]), ow, oh, p0, 32, false, false);
+    for (int r = 0; r < 2; r++)
+        for (int m = 1; m <= 3; m++) {
+            float pm[8] = {(float)m, (float)b->width / (float)iw[1 + 3 * r], jit[r][0], jit[r][1], hm};
+            post_pass_view(cb, pipes[m], src, 4, post_view(img[m + 3 * r]), iw[1 + 3 * r], ih[1 + 3 * r], pm, 32, false, false);
+        }
+    vk_full_barrier(cb);
+    size_t size = sizeof hdr;
+    for (int i = 0; i < 7; i++) size += (size_t)iw[i] * ih[i] * bpp[i];
+    if (ring[slot].cap < size) {
+        if (ring[slot].buf) { vk_wait_seq(ring[slot].seq); vmaDestroyBuffer(g_vk.vma, ring[slot].buf, ring[slot].mem); }
+        ring[slot].cap = size;
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info;
+        VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &ring[slot].buf, &ring[slot].mem, &info));
+        ring[slot].ptr = info.pMappedData;
+    }
+    memcpy(ring[slot].ptr, hdr, sizeof hdr);
+    size_t off = sizeof hdr;
+    for (int i = 0; i < 7; i++) {
+        VkBufferImageCopy c = {.bufferOffset = off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {iw[i], ih[i], 1}};
+        vkCmdCopyImageToBuffer(cb, img[i]->image, VK_IMAGE_LAYOUT_GENERAL, ring[slot].buf, 1, &c);
+        off += (size_t)iw[i] * ih[i] * bpp[i];
+    }
+    vk_full_barrier(cb);
+    ring[slot].seq = vk_pending_seq(), ring[slot].present = pc_, ring[slot].size = size, ring[slot].full = true;
+    slot = (slot + 1) % RING;
+    static bool logged;
+    if (!logged) logged = true, LOG("[srcap] %ux%u -> %ux%u, %zu bytes a frame into %s\n", b->width, b->height, ow, oh, size, srcap_dir());
+}
+
 static TexBackend *hold_copy_into(TexBackend *d, TexBackend *src);
 static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, double oh_d) {
     return post_process_ex(cb, b, ow_d, oh_d, NULL);
@@ -5711,8 +5852,22 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
         if (x2mip > 0) x2mip = getenv("LARECOMP_EXP2_MIPMIN") ? (float)atof(getenv("LARECOMP_EXP2_MIPMIN")) : -2.6f;
         float mlo = g_settings.upscaler == UPSCALE_DITTO_EXP2 ? x2mip : -2.0f;
         mb = mb < mlo ? mlo : mb > 0 ? 0 : mb;
+        // (LOCAL research, the training pairs: the large image's own bias + LARECOMP_SRCAP_MIP - srcap_run)
+        static float capmip = -100;
+        if (capmip == -100) capmip = getenv("LARECOMP_SRCAP_MIP") ? (float)atof(getenv("LARECOMP_SRCAP_MIP")) : 1.0f;
+        if (srcap_dir()) mb = capmip;
         if (mb != g_mip_bias) LOG("[post] mip bias %.2f\n", mb);
         g_mip_bias = mb;
+    }
+    if (srcap_dir() && !ip_side_post && !upscale && ao.depth && ao.taa_frame == fr && ao.proj_frame == fr &&
+        ao.depth->width == b->width && ao.depth->height == b->height) {
+        extern void vk_frame_suspend(void);
+        extern void vk_frame_resume(void);
+        vk_frame_suspend();
+        TexBackend *mt = ui_mask_build(cb, b, fr);
+        cb = vk_cmd();
+        srcap_run(cb, b, post_image_fmt(8, ao.depth->width, ao.depth->height, VK_FORMAT_R16G16B16A16_SFLOAT), mt, ow, oh);
+        vk_frame_resume();
     }
     // Debanding and a dither of one 8-bit step, last (deband.frag): on unless LARECOMP_DEBAND=0 (comparison). Off on
     // Android unless LARECOMP_DEBAND=1: ~12% of a phone's GPU frame at 1080p, for banding hardly seen on its screen.

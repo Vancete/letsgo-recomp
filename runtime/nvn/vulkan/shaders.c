@@ -1489,6 +1489,41 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(k > 0.0 ? mix(r, cr(uv), k) : r, 1.0);\n"
                "}\n";
     }
+    // ---- LOCAL research, the tiny network's training pairs (exec.c srcap_run, LARECOMP_SRCAP): from one image rendered
+    // at K x the output (no jitter), a.x = what: 0 the reference (a K x K box, a.y = K; alpha the interface mask's
+    // share), 1 the low-resolution colour (alpha the mask), 2 its depth (R32F), 3 its motion vectors (RG16F) - 1-3 a
+    // point sample of the large image where this frame's jitter (a.zw, render pixels: a pixel's sample at its centre
+    // - the jitter, as x2_upscale.frag reads it) puts it, a.y = large / low-resolution width. b.x = 1: a mask in m.
+    // t = the image, dep = the scene depth, mv = the motion vectors (uv now - uv before), m = the interface mask.
+    if (!strcmp(name, "srcap.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D dep;\n"
+               "layout(set = 0, binding = 2) uniform sampler2D mv;\n"
+               "layout(set = 0, binding = 3) uniform sampler2D m;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy), hs = textureSize(t, 0) - 1;\n"
+               "  int mode = int(pc.a.x + 0.5);\n"
+               "  if (mode == 0) {\n"
+               "    int k = int(pc.a.y + 0.5); vec3 s = vec3(0.0); float u = 0.0;\n"
+               "    for (int y = 0; y < k; y++)\n"
+               "      for (int x = 0; x < k; x++) {\n"
+               "        ivec2 q = min(p * k + ivec2(x, y), hs);\n"
+               "        s += texelFetch(t, q, 0).rgb;\n"
+               "        if (pc.b.x > 0.5) u += texelFetch(m, q, 0).r;\n"
+               "      }\n"
+               "    o = vec4(s, u) / float(k * k);\n"
+               "    return;\n"
+               "  }\n"
+               "  ivec2 q = clamp(ivec2(floor((vec2(p) + 0.5 - pc.a.zw) * pc.a.y)), ivec2(0), hs);\n"
+               "  if (mode == 1) o = vec4(texelFetch(t, q, 0).rgb, pc.b.x > 0.5 ? texelFetch(m, q, 0).r : 0.0);\n"
+               "  else if (mode == 2) o = vec4(texelFetch(dep, q, 0).r);\n"
+               "  else o = vec4(texelFetch(mv, q, 0).xy, 0.0, 0.0);\n"
+               "}\n";
+    }
     // GSR 2's output finished in one pass (exec.c post_process_ex): sharpened by RCAS (rcas.frag's, a.x its strength: 0
     // none), then the interface composited where the mask says interface (ui_composite.frag's: t1 by Catmull-Rom).
     // t0 = GSR 2's output, t1 = the image it was given (render size), m = the interface mask (render size; a.y = 1 when
