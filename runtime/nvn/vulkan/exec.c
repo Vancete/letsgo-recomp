@@ -81,6 +81,11 @@ static int cur_sub;
 static uint64_t submit_seq;  // last submitted
 static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool in_pass;
+// Deferred clears (clear_defer, below): pending until the next pass takes them as its load op, or recorded on their own
+// before anything else reaches the command buffer (vk_cmd)
+static int pclear_n;
+static bool pclear_hold;
+static void pclear_flush(void);
 
 uint64_t vk_completed_seq(void) {
     uint64_t v = 0;
@@ -165,6 +170,7 @@ static void begin_cb(VkCommandBuffer *cb, bool *begun) {
 
 static void gp_mark(VkCommandBuffer cb, const char *fmt, ...);
 VkCommandBuffer vk_cmd(void) {
+    if (pclear_n && !pclear_hold) pclear_flush();  // (whatever comes now may read or write a target cleared before it)
     Sub *s = sub();
     if (!s->main_begun) {
         begin_cb(&s->main, &s->main_begun);
@@ -1416,6 +1422,143 @@ static void vk_end_pass_at(int line) {
 
 static uint32_t level_extent(uint32_t v, uint32_t lv) { v >>= lv; return v ? v : 1; }
 
+// ---- Deferred clears. The game clears a target in a pass of its own (a depth-only target, then the scene's colour
+// and that depth: 6 - 8 such passes a frame in the world), each its own render pass: on a tiler the cleared image is
+// written to memory, and the next pass loads it back. A whole-target clear with no pass open is kept here instead and
+// becomes the load op (CLEAR) of the next pass that renders to the same target at the same size - nothing written or
+// read for it. Anything else first (another pass without that target, a copy, a dispatch, our passes, a submission:
+// all reach vk_cmd) records the pending clears as they were, in order. Measured on the phone (Adreno 830, world):
+// ~5 % of the frame's GPU time in those passes. LARECOMP_DEFER_CLEARS=0: each its own pass (comparison).
+typedef struct {
+    NvnTexture *t;
+    TexBackend *b;
+    NvnTextureView view;
+    bool has_view, color;
+    VkImageAspectFlags aspects;  // (depth / stencil: which of them)
+    VkClearValue v;
+    uint32_t w, h;  // (the level's extent: the pass taking it must render all of it)
+} PClear;
+static PClear pclear[9];
+
+static PClear *pclear_find(NvnTexture *t, const NvnTextureView *view, bool has_view, bool color) {
+    for (int i = 0; i < pclear_n; i++) {
+        PClear *p = &pclear[i];
+        if (p->t == t && p->color == color && p->has_view == has_view && (!has_view || !memcmp(&p->view, view, sizeof *view))) return p;
+    }
+    return NULL;
+}
+static void pclear_drop(PClear *p) { *p = pclear[--pclear_n]; }
+
+// (textures.c: a target's image destroyed - its pending clear goes with it)
+void vk_pclear_forget(TexBackend *b) {
+    for (int i = 0; i < pclear_n;)
+        if (pclear[i].b == b) pclear_drop(&pclear[i]); else i++;
+}
+
+static void pclear_flush(void) {
+    if (!pclear_n) return;
+    pclear_hold = true;
+    VkCommandBuffer cb = vk_cmd();
+    vk_full_barrier(cb);
+    for (int i = 0; i < pclear_n; i++) {
+        PClear *p = &pclear[i];
+        VkImageView v = vk_view(p->t, &p->view, p->has_view, true, TEXTYPE_2D);
+        if (!v) continue;
+        VkRenderingAttachmentInfo a = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = v,
+                                       .imageLayout = VK_IMAGE_LAYOUT_GENERAL, .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                       .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .clearValue = p->v};
+        VkRenderingAttachmentInfo da = a, sa = a;
+        VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {p->w, p->h}}, .layerCount = 1};
+        if (p->color) ri.colorAttachmentCount = 1, ri.pColorAttachments = &a;
+        else {
+            if (!(p->aspects & VK_IMAGE_ASPECT_DEPTH_BIT)) da.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            if (!(p->aspects & VK_IMAGE_ASPECT_STENCIL_BIT)) sa.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            if (p->b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ri.pDepthAttachment = &da;
+            if (p->b->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) ri.pStencilAttachment = &sa;
+        }
+        vkCmdBeginRendering(cb, &ri);
+        vkCmdEndRendering(cb);
+    }
+    vk_full_barrier(cb);
+    pclear_n = 0;
+    pclear_hold = false;
+}
+
+// The current target's attachment (colour index, or -1: depth) and its level's extent; false when it has none
+static bool rt_attachment(int index, NvnTexture **t, uint32_t *w, uint32_t *h, uint32_t *gw, uint32_t *gh) {
+    NvnTexture *x = index >= 0 ? st.rt.color[index] : st.rt.depth;
+    if (!x || !x->backend) return false;
+    bool hv = index >= 0 ? st.rt.has_cview[index] : st.rt.has_dview;
+    const NvnTextureView *v = index >= 0 ? &st.rt.cview[index] : &st.rt.dview;
+    uint32_t lv = hv && (v->setmask & 1) ? v->base_level : 0;
+    TexBackend *b = x->backend;
+    *t = x, *w = level_extent(b->width, lv), *h = level_extent(b->height, lv);
+    *gw = level_extent(x->width, lv), *gh = level_extent(x->height, lv);
+    return true;
+}
+
+// A clear (clear(), its arguments) with no pass open kept as pending: true when kept. Only what the pass would have
+// done exactly: a whole clear (all channels, the scissor over the whole target), every attachment of the target the
+// same size; the colour targets' first-use clears of begin_pass (renderer_texture_*_fresh: the alpha) kept with it.
+static bool clear_defer(int index, const void *color, uint32_t mask, bool depth, float dval, bool stencil, uint32_t sval, uint32_t smask) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_DEFER_CLEARS") ? atoi(getenv("LARECOMP_DEFER_CLEARS")) : 1;
+    if (!on || (in_pass && !st.rt_dirty)) return false;
+    if (!((index < 0 || (mask & 0xF) == 0xF) && (!stencil || (smask & 0xFF) == 0xFF))) return false;
+    if (index >= 0 ? index >= st.rt.ncolor || !st.rt.color[index] : !st.rt.depth || !(depth || stencil)) return false;
+    if (st.rt.depth && !renderer_format_is_depth(st.rt.depth->format)) return false;
+    uint32_t w = 0, h = 0, gw = 0, gh = 0;
+    for (int i = -1; i < st.rt.ncolor; i++) {
+        NvnTexture *t;
+        uint32_t aw, ah, agw, agh;
+        if (!rt_attachment(i, &t, &aw, &ah, &agw, &agh)) continue;
+        if (!vk_view(t, i >= 0 ? &st.rt.cview[i] : &st.rt.dview, i >= 0 ? st.rt.has_cview[i] : st.rt.has_dview, true, TEXTYPE_2D))
+            return false;
+        if (w && (aw != w || ah != h)) return false;
+        w = aw, h = ah, gw = agw, gh = agh;
+    }
+    if (!w) return false;
+    int64_t x = st.scissor[0][0], y = st.scissor[0][1];
+    if (x > 0 || y > 0 || x + st.scissor[0][2] < (int64_t)gw || y + st.scissor[0][3] < (int64_t)gh) return false;
+    if (pclear_n + st.rt.ncolor + 1 > (int)(sizeof pclear / sizeof *pclear)) pclear_flush();
+    vk_end_pass();  // (a pass of another target still open: ended, as begin_pass would)
+    for (int i = -1; i < st.rt.ncolor; i++) {
+        NvnTexture *t;
+        uint32_t aw, ah, agw, agh;
+        if (!rt_attachment(i, &t, &aw, &ah, &agw, &agh)) continue;
+        renderer_mark_gpu_owned(t);
+        const NvnTextureView *v = i >= 0 ? &st.rt.cview[i] : &st.rt.dview;
+        bool hv = i >= 0 ? st.rt.has_cview[i] : st.rt.has_dview;
+        VkClearValue cv = {0};
+        VkImageAspectFlags as = 0;
+        if (i >= 0) {  // (begin_pass's first-use clear: its alpha; the game's own clear over it)
+            bool fresh = (int)renderer_texture_level_fresh(t) | (int)renderer_texture_frame_fresh(t);
+            bool first = renderer_texture_first_write(t) || fresh;
+            if (i == index) memcpy(cv.color.float32, color, 16);
+            else if (first) cv.color.float32[3] = fresh ? 0.0f : 1.0f;
+            else continue;
+        } else {
+            TexBackend *b = t->backend;
+            as = (depth && (b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) |
+                 (stencil && (b->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+            if (index >= 0 || !as) continue;
+            cv.depthStencil = (VkClearDepthStencilValue){dval, sval};
+        }
+        PClear *p = pclear_find(t, v, hv, i >= 0);
+        if (!p) {
+            p = &pclear[pclear_n++];
+            *p = (PClear){.t = t, .b = t->backend, .view = *v, .has_view = hv, .color = i >= 0, .w = aw, .h = ah};
+        }
+        if (i >= 0) p->v = cv;
+        else {  // (a depth clear and a stencil clear one after the other: both)
+            if (as & VK_IMAGE_ASPECT_DEPTH_BIT) p->v.depthStencil.depth = dval;
+            if (as & VK_IMAGE_ASPECT_STENCIL_BIT) p->v.depthStencil.stencil = sval;
+            p->aspects |= as;
+        }
+    }
+    return true;
+}
+
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     vk_end_pass();
@@ -1425,6 +1568,7 @@ static void begin_pass(void) {
         taa_run();
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each pass its own submission)
     st.rt_dirty = false;
+    pclear_hold = true;  // (the pending clears: this pass's load ops, or recorded before it - below)
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
     {
@@ -1500,6 +1644,25 @@ static void begin_pass(void) {
     }
     if (!w) { pass_sx = pass_sy = 1; minw = minh = 16; }
     pass_w = minw; pass_h = minh;
+    if (pclear_n) {  // (clear_defer: this pass's targets' pending clears are its load ops; the others recorded first)
+        for (int i = -1; i < (int)pass_ncolor; i++) {
+            if (i >= 0 ? !ca[i].imageView : !has_d && !has_s) continue;
+            NvnTexture *t = i >= 0 ? st.rt.color[i] : st.rt.depth;
+            PClear *p = pclear_find(t, i >= 0 ? &st.rt.cview[i] : &st.rt.dview, i >= 0 ? st.rt.has_cview[i] : st.rt.has_dview, i >= 0);
+            if (!p || p->w != minw || p->h != minh) continue;
+            if (i >= 0) ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, ca[i].clearValue = p->v;
+            else {
+                if (has_d && (p->aspects & VK_IMAGE_ASPECT_DEPTH_BIT)) da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, da.clearValue = p->v;
+                if (has_s && (p->aspects & VK_IMAGE_ASPECT_STENCIL_BIT)) sa.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, sa.clearValue = p->v;
+                if ((p->aspects & VK_IMAGE_ASPECT_DEPTH_BIT) && !has_d) continue;  // (an aspect this pass lacks: recorded)
+                if ((p->aspects & VK_IMAGE_ASPECT_STENCIL_BIT) && !has_s) continue;
+            }
+            pclear_drop(p);
+        }
+        pclear_hold = false;
+        pclear_flush();
+    }
+    pclear_hold = false;
     ao.qual = false;
     if ((g_settings.ssao || g_settings.gi || g_settings.contact_on || mv_wanted()) && pass_ncolor && ca[0].imageView && has_d && pass_samples == 1 && st.rt.color[0]) {  // (TAA: mv_wanted)
         TexBackend *c0 = st.rt.color[0]->backend;
@@ -1689,6 +1852,7 @@ static VkPipeline clear_pipeline(int index, int kind, uint32_t mask, bool depth,
 
 static void clear(int index, int kind, const void *color, uint32_t mask, bool depth, float dval, bool stencil, uint32_t sval,
                   uint32_t smask) {
+    if (clear_defer(index, color, mask, depth, dval, stencil, sval, smask)) return;
     begin_pass();
     VkCommandBuffer cb = vk_cmd();
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
@@ -5943,11 +6107,13 @@ static VkImageView post_process_ex(VkCommandBuffer cb, TexBackend *b, double ow_
 
 // Inside the window image's rendering (device.c vk_frame_begin): the game image into (vx, vy, vw, vh).
 static VkImageView ip_post_view(TexBackend *b, double ow, double oh);
+static float ip_present_sharp;  // (the image drawn now: its IpKeep's sharp - the optical flow's sharpening, flow_image)
 void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8]) {
     if (!b || !b->image || (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return;
     double ow = pv[6] > 0 ? vw / pv[6] : vw, oh = pv[7] > 0 ? vh / pv[7] : vh;
+    ip_present_sharp = 0;
     VkImageView src = ip_post_view(b, ow, oh);  // (an image of a present kept until now: processed when it was made)
-    if (!src) src = post_process(cb, b, ow, oh);
+    if (!src) src = post_process(cb, b, ow, oh), ip_present_sharp = 0;
     gp_mark(cb, "ours: present to the window, menus%s", g_present_grade[3] > 0.5f ? ", grade" : "");
     VkPipeline p = present_pipeline(g_vk.sc_format);
     VkDescriptorSet ds = vk_alloc_set(present_set_layout);
@@ -5961,6 +6127,7 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
     vkCmdSetViewport(cb, 0, 1, &vp);
     float pc[12];
     memcpy(pc, pv, 32);
+    pc[1] = ip_present_sharp;  // (a.y: the optical flow's sharpening, flow_image)
     memcpy(pc + 8, g_present_grade, 16);
     vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pc);
     vkCmdDraw(cb, 3, 1, 0, 0);
@@ -7313,7 +7480,8 @@ static void ip_note_list(uint64_t handle) {
 // not copied: its processed image is drawn from where post_process_ex left it (direct), before the next replay writes
 // there in the command buffer's order. At 4K a copy was ~66 MB of traffic and two full barriers an image.
 #define IP_KEEP_N 8
-typedef struct { TexBackend raw, post; TexBackend *direct; bool post_ok, raw_ok; double ow, oh; } IpKeep;
+// (sharp: the optical flow's sharpening left to the present's draw - flow_image - its strength; 0 none)
+typedef struct { TexBackend raw, post; TexBackend *direct; bool post_ok, raw_ok; double ow, oh; float sharp; } IpKeep;
 static IpKeep ip_keep_sets[2][IP_KEEP_N + 1], *ip_keep = ip_keep_sets[0];
 static TexBackend *hold_copy_into(TexBackend *d, TexBackend *src);
 static VkImageView ip_post_view(TexBackend *b, double ow, double oh) {
@@ -7322,6 +7490,7 @@ static VkImageView ip_post_view(TexBackend *b, double ow, double oh) {
         if (b != &k->raw) continue;
         if (!k->post_ok) return VK_NULL_HANDLE;
         k->post_ok = false;
+        ip_present_sharp = k->sharp;
         TexBackend *d = k->direct;
         k->direct = NULL;
         if (fabs(ow - k->ow) > 0.5 || fabs(oh - k->oh) > 0.5) return VK_NULL_HANDLE;  // (the window changed size)
@@ -7334,6 +7503,7 @@ static TexBackend *ip_keep_image(TexBackend *b, int slot, bool now) {
     IpKeep *k = &ip_keep[slot];
     k->post_ok = k->raw_ok = false;
     k->direct = NULL;
+    k->sharp = 0;
     TexBackend *res = NULL, *in = b;
     // (a reduced in-between image without FSR 3.1: back to N's size against N's image first, then processed as N was)
     if (slot != IP_KEEP_N && vk_tex_lo_active() && !fsr3_on() && !gsr2_on()) in = ip_lo_resolve(b);
@@ -7543,10 +7713,18 @@ static TexBackend *flow_image(TexBackend *b, int slot, bool now) {
     VkImageView wi[6] = {post_view(c0), post_view(c1), post_view(F), post_view(D), Fp ? post_view(Fp) : dummy,
                          mask ? post_view(ip_ui_mask) : dummy};
     post_pass_view(cb, p, wi, 6, post_view(out), w, h, pw, sizeof pw, false, false);
-    if (sharp > 0) {
+    // The sharpening in the present's own draw when it shows the image pixel for pixel (the output's size: present.frag,
+    // a.y) - one full-size pass written and read back less (at 2670 x 1200 on the phone, ~0.7 ms of the GPU's ~12 a
+    // frame at its top clock). Else a pass of its own. LARECOMP_FLOW_SHARP_PASS=1: always its own pass (comparison).
+    static int sharp_pass = -1;
+    if (sharp_pass < 0) sharp_pass = getenv("LARECOMP_FLOW_SHARP_PASS") ? atoi(getenv("LARECOMP_FLOW_SHARP_PASS")) : 0;
+    k->sharp = 0;
+    if (sharp > 0 && !sharp_pass && w == (uint32_t)lround(kn->ow) && h == (uint32_t)lround(kn->oh)) k->sharp = sharp;
+    else if (sharp > 0) {
         TexBackend *o2 = post_image(46, w, h);
         float pz[8] = {sharp};
         VkImageView si[1] = {post_view(out)};
+        gp_mark(cb, "ours: flow sharpen");
         post_pass_view(cb, ps, si, 1, post_view(o2), w, h, pz, 32, false, false);
         out = o2;
     }
