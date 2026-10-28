@@ -5770,7 +5770,8 @@ static TexBackend *gsr2_run(VkCommandBuffer cb, TexBackend *in, TexBackend *mv, 
     static float k[4] = {-1, 0, 0, 0};
     if (k[0] < 0) {
         k[3] = getenv("LARECOMP_EXP2_WIDTH") ? (float)atof(getenv("LARECOMP_EXP2_WIDTH")) : 1.4f;  // (1.4 x the narrow one)
-        k[0] = getenv("LARECOMP_EXP2_ALPHA") ? (float)atof(getenv("LARECOMP_EXP2_ALPHA")) : 0.05f;  // (at rest: as stable as GSR 2)
+        // (at rest, a pixel stable for 3 frames: x2_upscale.frag's stability level - 0.05 before it, as stable as GSR 2)
+        k[0] = getenv("LARECOMP_EXP2_ALPHA") ? (float)atof(getenv("LARECOMP_EXP2_ALPHA")) : 0.035f;
         k[1] = getenv("LARECOMP_EXP2_CONF") ? (float)atof(getenv("LARECOMP_EXP2_CONF")) : 0.3f;  // (the narrow estimate from 0.3)
         k[2] = getenv("LARECOMP_EXP2_GAMMA") ? (float)atof(getenv("LARECOMP_EXP2_GAMMA")) : 0;
     }

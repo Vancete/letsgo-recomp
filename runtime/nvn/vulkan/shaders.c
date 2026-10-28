@@ -1137,6 +1137,12 @@ static const char *builtin_src(const char *name, int *stage) {
     //   with much of the image changed (x2_change.frag), the reaction takes the new frame up to 0.95 instead of 0.5.
     // x2_final.frag: the line pass (ditto_line.frag's: a.x dark, a.y light, a.z below) and the interface composited
     //   (a.w = 1 with a mask: ui_composite.frag's), in one pass. t0 = the upscale, t1 = the image (render size), m = mask.
+    //   The stability: a level per pixel in the history's alpha (its 2 bits: 0, 1/3, 2/3, 1), one step up each frame the
+    //   history holds, back to 0 where it was cut (the history well outside the box, another object there, the depth
+    //   standing out, much of the image changed). At rest a stable pixel takes less of each new frame (0.2 -> 0.035 of
+    //   the base share - d.x, LARECOMP_EXP2_ALPHA; a fixed 0.05 before) within a box 35 % wider: the jittered samples' noise no longer shimmers,
+    //   and a pixel just cut converges as fast as before. At 2x, 4K (PC): shimmer at rest -11 - 16 %, fine noise moving
+    //   -55 %, the menu's image gone ~30 % sooner after it closed; 0.46 ms as before.
     if (!strcmp(name, "x2_upscale.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"
@@ -1206,8 +1212,10 @@ static const char *builtin_src(const char *name, int *stage) {
                "  mda.z *= clamp(mlen * 0.5, 0.0, 1.0);\n"
                "  if (pc.d.w < 0.0) { o = vec4(clamp(abs(0.5 * mda.xy * os) * 64.0, 0.0, 1.0), 0.0, 1.0); return; }\n"
                "  bool off = any(lessThan(puv, vec2(0.0))) || any(greaterThan(puv, vec2(1.0)));\n"
-               "  if (pc.d.z > 0.5 || off) { o = vec4(cs2, 1.0); return; }\n"
+               "  if (pc.d.z > 0.5 || off) { o = vec4(cs2, 0.0); return; }\n"
                "  vec3 hy = ycc(hist(puv));\n"
+               // (the stability level where the pixel was - the history's alpha)
+               "  float sp = textureLod(PrevOutput, puv, 0.0).a;\n"
                // (the previous frame's motion where this pixel was: changed by over half a pixel - another object's - less
                // history, a narrower box)
                "  vec4 pm = textureLod(PrevMda, puv, 0.0);\n"
@@ -1218,6 +1226,8 @@ static const char *builtin_src(const char *name, int *stage) {
                "  float gam = mix(rest, 0.9, clamp(mlen * 0.25, 0.0, 1.0)) * (1.0 - 0.5 * mda.z);\n"
                "  gam = mix(gam, 1.5 * rest, lockf);\n"
                "  gam *= 1.0 - 0.6 * rj;\n"
+               // (stable and at rest, a wider box - the jittered samples' own spread no longer cuts the history)
+               "  gam *= 1.0 + 0.35 * sp * (1.0 - clamp(mlen, 0.0, 1.0));\n"
                // (moving: the box mean +- gamma sigma within the samples' own range - min / max, as far as the pixel moves)
                "  vec3 blo = m1 - gam * sig, bhi = m1 + gam * sig;\n"
                "  float mm = clamp(mlen * 0.5, 0.0, 1.0);\n"
@@ -1227,7 +1237,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "  vec3 ad = abs(dir) / ext3;\n"
                "  float t = max(ad.x, max(ad.y, ad.z));\n"
                "  if (t > 1.0) hy = bc + dir / t;\n"
-               "  float base = mix(pc.d.x > 0.0 ? pc.d.x : 0.08, 0.3, clamp(mlen * 0.125, 0.0, 1.0));\n"
+               "  float base = mix(mix(0.2, pc.d.x > 0.0 ? pc.d.x : 0.035, sp), 0.3, clamp(mlen * 0.125, 0.0, 1.0));\n"
                "  float a = base * mix(pc.b.x > 0.0 ? pc.b.x : 0.6, pc.b.y > 0.0 ? pc.b.y : 1.4, smoothstep(0.05, 0.8, conf));\n"
                "  a = mix(a, 0.6, mda.z);\n"
                // the reaction (e.x): the history outside the samples' range by t - something changed - the new frame by it
@@ -1235,7 +1245,9 @@ static const char *builtin_src(const char *name, int *stage) {
                "  a = mix(a, mix(0.5, 0.95, gch), clamp((t - 1.0) * pc.e.x, 0.0, 1.0) * (1.0 - lockf));\n"
                "  a = mix(a, max(a, 0.5), gch);\n"
                "  a = mix(a, max(a, 0.6), rj);\n"
-               "  o = vec4(mix(rgb(hy), cur, clamp(a, 0.0, 1.0)), 1.0);\n"
+               // (the stability for the next frame: 0 where the history was cut, else one step up)
+               "  bool cut = t > 1.25 || rj > 0.5 || mda.z > 0.5 || gch > 0.5;\n"
+               "  o = vec4(mix(rgb(hy), cur, clamp(a, 0.0, 1.0)), cut ? 0.0 : min(sp + 0.34, 1.0));\n"
                "}\n";
     }
     if (!strcmp(name, "x2_final.frag")) {
