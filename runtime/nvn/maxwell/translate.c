@@ -2094,7 +2094,11 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg, char *flags) {
             // (the interface, wide_.y: 1 - into the centred box, but what touches the screen's left or right edge stays
             // at the window's (its positions have w != 1 too: x against w); 2 - a background, the screen's width the
             // window's and its height grown as much, cropped: cover - every vertex alike, a background in pieces too)
-            sp(&s, "  if (wide_.y > 1.5f) gl_Position.y /= wide_.x;\n"
+            // 3 - a camera-attached effect sized for 16:9: as it is, stretched to the window's width by the viewport;
+            // 4 - 3D with a depth test, its projection's perspective or not: the Pokedex's model is orthographic, w 1)
+            sp(&s, "  if (wide_.y > 3.5f) gl_Position.x *= wide_.x;\n"
+                   "  else if (wide_.y > 2.5f) {}\n"
+                   "  else if (wide_.y > 1.5f) gl_Position.y /= wide_.x;\n"
                    "  else if (wide_.y > 0.5f) {\n"
                    "    if (abs(gl_Position.x) < 0.999f * abs(gl_Position.w)) gl_Position.x *= wide_.x;\n"
                    "  } else if (gl_Position.w != 1.0f) gl_Position.x *= wide_.x;\n");

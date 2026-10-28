@@ -20,6 +20,19 @@ static float g_aspect;  // 0: off (16:9 or narrower, or not asked for)
 
 float widescreen_aspect(void) { return g_aspect; }
 
+// Camera-attached effects sized for 16:9 (fragment shader hashes, exec.c): stretched to the window's width instead of
+// widened like the scene - in a wider view their edges showed what is behind them. The battle's intro: the speed lines
+// and the blurred layers in front of the camera (seen only there: not in the field, the menus or the battle itself).
+bool widescreen_effect_stretch(uint64_t fs_hash) {
+    static const uint64_t k[] = {
+        0xfe3974013981793bull, 0x4f5aeaa6d52a4a20ull, 0xd182ecd7604c2ba3ull, 0xb078ed586ed38ccfull, 0x7b86f76c3fc7e7b8ull,
+        0x66355c8d6c8a87acull, 0x0bca8450cf2dac19ull, 0x363b2c62cb2a147aull, 0x043f15f1d68da892ull,
+    };
+    for (size_t i = 0; i < sizeof k / sizeof *k; i++)
+        if (k[i] == fs_hash) return true;
+    return false;
+}
+
 // The window's drawable size, every present (runtime/nvn/vulkan/device.c)
 void widescreen_window(double w, double h) {
     static int env = -2;

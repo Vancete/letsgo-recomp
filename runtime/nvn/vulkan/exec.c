@@ -4170,6 +4170,18 @@ static void draw_(CmdRec *r, bool indexed) {
     // interface placement depend on the decision: both sets after it (stage_set fills tex_sc for stage 1).
     if (prof) prof_dyn += SDL_GetTicksNS() - prof_td_;
     g_wide_ui = 0;
+    {   // wide screens: camera-attached effects sized for 16:9 stretched, not widened (ShaderKey.widen's 3) - the battle's
+        // intro (the speed lines and the blurred layers in front of the camera: in a wider view their edges showed the
+        // field behind); LARECOMP_WIDE_STRETCH=<fs hash>,... adds others (research). Depth-tested 3D otherwise widened
+        // whatever its projection (4: the Pokedex's model is orthographic).
+        extern bool widescreen_effect_stretch(uint64_t fs_hash);
+        static char list[512] = {1};
+        if (list[0] == 1) snprintf(list, sizeof list, "%s", getenv("LARECOMP_WIDE_STRETCH") ? getenv("LARECOMP_WIDE_STRETCH") : "");
+        char h[20];
+        snprintf(h, sizeof h, "%016llx", (unsigned long long)g_cur_fs_hash);
+        if (vkey.widen && (widescreen_effect_stretch(g_cur_fs_hash) || (list[0] && strstr(list, h)))) g_wide_ui = 3;
+        else if (vkey.widen && dt) g_wide_ui = 4;
+    }
     bool wide_vp = false;  // (the interface placed by its vertex shader: the viewport the whole image's)
     VkDescriptorImageInfo fii[64];
     uint64_t prof_tx_ = prof ? SDL_GetTicksNS() : 0;
