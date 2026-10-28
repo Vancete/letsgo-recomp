@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw
 CROPS = [("rest: player", "t", (1780, 860, 320, 320)), ("rest: fence", "t", (1350, 250, 320, 320)),
          ("moving: player", "m", (1760, 900, 320, 320))]
 ROWS = [("nat", "Native (SMAA)"), ("fsr3", "FSR 3.1"), ("ditto", "DittoSR"), ("fsr4", "DittoSR (FSR4)"),
-        ("net", "DittoSR Net"), ("stud", "DittoSR Net (student)"), ("stud1", "Net (student, scale 1)"), ("stud2", "Net v2 (student)")]
+        ("net", "DittoSR Net"), ("stud", "DittoSR Net (student)"), ("stud1", "Net (student, scale 1)"), ("stud2m", "Net v2 (mixed teacher)"), ("stud2", "Net v2 (student)")]
 
 
 def main():
