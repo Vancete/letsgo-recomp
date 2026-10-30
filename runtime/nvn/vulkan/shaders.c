@@ -1074,7 +1074,8 @@ static const char *builtin_src(const char *name, int *stage) {
     // of the nearest of the 3x3 (ours: a moving silhouette's own over the background around it, no trail behind its edges).
     // a.xy = render size, b.xy = 1 / render size, d.x = tan(horizontal fov / 2).
     // gsr2_convert.frag (render size, RGBA16F): xy = the motion (NDC), z = depth clip (how far this pixel's depth stands
-    // out from its 4x4 neighbourhood's: its history is less trusted). t0 = depth (1: far), t1 = our motion vectors.
+    // out from its 4x4 neighbourhood's: its history is less trusted), w = the nearest of the 3x3's nearness (1 - depth:
+    // x2_upscale.frag's disocclusion reads the previous frame's). t0 = depth (1: far), t1 = our motion vectors.
     if (!strcmp(name, "gsr2_convert.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"
@@ -1115,15 +1116,15 @@ static const char *builtin_src(const char *name, int *stage) {
                "    if (dd < dmin) { dmin = dd; best = q; }\n"
                "  }\n"
                "  vec2 v = texelFetch(InputVelocity, clamp(mp + best, ivec2(0), ms - 1), 0).xy;\n"
-               "  o = vec4(2.0 * v, depthclip, 0.0);\n"
+               "  o = vec4(2.0 * v, depthclip, 1.0 - dmin);\n"
                "}\n";
     }
     // ---- DittoSR (exec.c gsr2_run, UPSCALE_DITTOSR): GSR 2's convert pass, then an upscale of our own, and a final
     // pass. Push constants as GSR 2's (a = render size, output size; b = their reciprocals; c.xy = the jitter, c.z = output
     // / render width; d.z = reset; research knobs, 0 their defaults: d.x the history's largest weight (10), d.y the
-    // confidence the narrow estimate is taken alone from (0.3), d.w the history clip width at rest (1.5).
-    // x2_upscale.frag (80 bytes of constants: e.x the reaction to changes, e.y the edge-directed Gaussian, e.z thin
-    // lines kept): t0 = the previous output, t1 = gsr2_convert's (xy motion in NDC, z depth clip), t2 = the colour, t3 =
+    // confidence the narrow estimate is taken alone from (0.05), d.w the history clip width at rest (1.5).
+    // x2_upscale.frag (e.x the reaction to changes, e.y the edge-directed Gaussian, e.z thin lines kept; f and g below):
+    // t0 = the previous output, t1 = gsr2_convert's (xy motion in NDC, z depth clip), t2 = the colour, t3 =
     // the previous frame's gsr2_convert, t4 = x2_change.frag's.
     //   The current frame: the 3x3 render samples around the pixel, each where its jitter put it, weighted by a Gaussian
     //   of its distance in output pixels (narrow: confident where a sample landed close) and by a wider one in render
@@ -1135,18 +1136,27 @@ static const char *builtin_src(const char *name, int *stage) {
     //   Against ghosting: where the motion differs from the previous frame's where the pixel was (another object there
     //   now), less history and a narrower box; moving, the box within the 9 samples' own min / max. The fast settling:
     //   with much of the image changed (x2_change.frag), the reaction takes the new frame up to 0.95 instead of 0.5.
-    // x2_final.frag: the line pass (ditto_line.frag's: a.x dark, a.y light, a.z below) and the interface composited
-    //   (a.w = 1 with a mask: ui_composite.frag's), in one pass. t0 = the upscale, t1 = the image (render size), m = mask.
+    // x2_final.frag: the sharpening (the standalone DittoSR's: contrast-adaptive, a.x its strength, faded out as the
+    //   pixel moves and with a low stability level) and the interface composited (a.w = 1 with a mask:
+    //   ui_composite.frag's), in one pass. t0 = the upscale, t1 = the image (render size), m = mask, mv = gsr2_convert's.
     //   The stability: a level per pixel in the history's alpha (its 2 bits: 0, 1/3, 2/3, 1), one step up each frame the
     //   history holds, back to 0 where it was cut (the history well outside the box, another object there, the depth
     //   standing out, much of the image changed). At rest a stable pixel takes less of each new frame (0.2 -> 0.035 of
     //   the base share - d.x, LARECOMP_EXP2_ALPHA; a fixed 0.05 before) within a box 35 % wider: the jittered samples' noise no longer shimmers,
     //   and a pixel just cut converges as fast as before. At 2x, 4K (PC): shimmer at rest -11 - 16 %, fine noise moving
     //   -55 %, the menu's image gone ~30 % sooner after it closed; 0.46 ms as before.
+    // (the upscale as in the standalone DittoSR - its shaders/upscale.hlsl, tuned on Cyberpunk 2077 - 112 bytes of
+    // constants: then f.x the new frame's base share moving (0.15), f.y the colour's Gaussian width moving (1.6), f.z b.y
+    // moving (1.5), f.w the history clipped by its low frequencies (1); g.x the disocclusion (0) or GSR 2's depth clip
+    // (1), g.y the clip width moving (1.5), g.z how far the box keeps within the samples' min / max moving (1), g.w the
+    // frame weight - x the new frame's share (dittosr_frame_weight). Moving, the colour through a wider Gaussian and
+    // less of the new frame (the render grid showed as a stipple); the motion change against the neighbours' (the camera
+    // speeding up cut the whole history); the disocclusion from gsr2_convert's nearness (w); the history clipped by its
+    // low frequencies (the samples' aliasing dragged its detail toward one frame))
     if (!strcmp(name, "x2_upscale.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"
-               "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; } pc;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; vec4 f; vec4 g; } pc;\n"
                "layout(location = 0) out vec4 o;\n"
                "layout(set = 0, binding = 0) uniform sampler2D PrevOutput;\n"
                "layout(set = 0, binding = 1) uniform sampler2D MotionDepthClip;\n"
@@ -1155,23 +1165,29 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(set = 0, binding = 4) uniform sampler2D Change;\n"
                "vec3 ycc(vec3 c) { return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * (c.r - c.b), 0.5 * c.g - 0.25 * (c.r + c.b)); }\n"
                "vec3 rgb(vec3 y) { return vec3(y.x + y.y - y.z, y.x + y.z, y.x - y.y - y.z); }\n"
-               "vec3 hist(vec2 uv) {\n"  // (Catmull-Rom in 5 bilinear taps)
+               "vec3 hist(vec2 uv, out vec3 low) {\n"  // (Catmull-Rom in 5 bilinear taps; low: their plain mean, ~3 pixels wide)
                "  vec2 sz = pc.a.zw, p = uv * sz, c1 = floor(p - 0.5) + 0.5, f = p - c1;\n"
                "  vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f);\n"
                "  vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f), w12 = w1 + w2;\n"
                "  vec2 q0 = (c1 - 1.0) / sz, q3 = (c1 + 2.0) / sz, q12 = (c1 + w2 / w12) / sz;\n"
-               "  vec3 r = textureLod(PrevOutput, vec2(q12.x, q0.y), 0.0).rgb * w12.x * w0.y\n"
-               "         + textureLod(PrevOutput, vec2(q0.x, q12.y), 0.0).rgb * w0.x * w12.y\n"
-               "         + textureLod(PrevOutput, q12, 0.0).rgb * w12.x * w12.y\n"
-               "         + textureLod(PrevOutput, vec2(q3.x, q12.y), 0.0).rgb * w3.x * w12.y\n"
-               "         + textureLod(PrevOutput, vec2(q12.x, q3.y), 0.0).rgb * w12.x * w3.y;\n"
+               "  vec3 ta = textureLod(PrevOutput, vec2(q12.x, q0.y), 0.0).rgb, tb = textureLod(PrevOutput, vec2(q0.x, q12.y), 0.0).rgb;\n"
+               "  vec3 tc = textureLod(PrevOutput, q12, 0.0).rgb, td = textureLod(PrevOutput, vec2(q3.x, q12.y), 0.0).rgb;\n"
+               "  vec3 te = textureLod(PrevOutput, vec2(q12.x, q3.y), 0.0).rgb;\n"
+               "  low = 0.2 * (ta + tb + tc + td + te);\n"
+               "  vec3 r = ta * w12.x * w0.y + tb * w0.x * w12.y + tc * w12.x * w12.y + td * w3.x * w12.y + te * w12.x * w3.y;\n"
                "  float ws = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;\n"
                "  return clamp(r / ws, 0.0, 1.0);\n"
                "}\n"
                "void main() {\n"
                "  vec2 rs = pc.a.xy, os = pc.a.zw, jit = pc.c.xy;\n"
                "  vec2 uv = gl_FragCoord.xy * pc.b.zw, q = uv * rs;\n"
-               "  float ks = max(pc.c.z, 1.0) / (pc.c.w > 0.0 ? pc.c.w : 1.0);\n"
+               "  vec4 mda4 = textureLod(MotionDepthClip, uv, 0.0);\n"
+               "  float mlen = length(0.5 * mda4.xy * os);\n"
+               // (moving - from 4 output pixels a frame - the history holds little and the frame's own samples carry the
+               // image: its colour through a wider Gaussian (f.y), the narrow one, nearly the nearest sample, showing the
+               // render samples' grid as a stipple. The samples' confidence - the new frame's share - stays the narrow one's)
+               "  float mf = clamp((mlen - 0.5) / 3.5, 0.0, 1.0), wd = pc.c.w > 0.0 ? pc.c.w : 1.0;\n"
+               "  float ks = max(pc.c.z, 1.0) / wd, km = max(pc.c.z, 1.0) / (pc.f.y > 0.0 ? pc.f.y : wd);\n"
                "  ivec2 b0 = ivec2(floor(q + jit)), cs = textureSize(InputColor, 0) - 1;\n"
                "  vec3 cc[9]; float l[9];\n"
                "  for (int i = 0; i < 9; i++) {\n"
@@ -1191,54 +1207,87 @@ static const char *builtin_src(const char *name, int *stage) {
                "  for (int i = 0; i < 9; i++) if (i != 4) { omn = min(omn, l[i]); omx = max(omx, l[i]); }\n"
                "  float ext = max(omn - l[4], l[4] - omx) / (lmx - lmn + 1e-3);\n"
                "  float lockf = pc.e.z * clamp(ext * 4.0 + 0.5 * step(0.0, ext), 0.0, 1.0);\n"
-               "  vec3 sg = vec3(0.0), ss = vec3(0.0), m1 = vec3(0.0), m2 = vec3(0.0), ymn = vec3(1e9), ymx = vec3(-1e9);\n"
-               "  float wg = 0.0, wsum = 0.0;\n"
+               "  vec3 sg = vec3(0.0), sm = vec3(0.0), ss = vec3(0.0), m1 = vec3(0.0), m2 = vec3(0.0), ymn = vec3(1e9), ymx = vec3(-1e9);\n"
+               "  float wg = 0.0, wm = 0.0, wsum = 0.0;\n"
                "  for (int i = 0; i < 9; i++) {\n"
                "    vec2 d = vec2(b0 + ivec2(i % 3 - 1, i / 3 - 1)) + 0.5 - jit - q;\n"
-               "    float dn = dot(d, nrm), dt = dot(d, vec2(-nrm.y, nrm.x));\n"
-               "    float w = exp(-2.26 * (dn * dn + dt * dt * along) * ks * ks), w2 = exp(-1.4 * dot(d, d));\n"
-               "    sg += cc[i] * w; wg += w; ss += cc[i] * w2; wsum += w2;\n"
+               "    float dn = dot(d, nrm), dt = dot(d, vec2(-nrm.y, nrm.x)), r2 = dn * dn + dt * dt * along;\n"
+               "    float w = exp(-2.26 * r2 * ks * ks), w2 = exp(-1.4 * dot(d, d)), w3 = exp(-2.26 * r2 * km * km);\n"
+               "    sg += cc[i] * w; wg += w; ss += cc[i] * w2; wsum += w2; sm += cc[i] * w3; wm += w3;\n"
                "    vec3 yc = ycc(cc[i]); m1 += yc; m2 += yc * yc; ymn = min(ymn, yc); ymx = max(ymx, yc);\n"
                "  }\n"
                "  m1 /= 9.0; vec3 sig = sqrt(max(m2 / 9.0 - m1 * m1, 0.0));\n"
-               "  vec3 cg = sg / max(wg, 1e-6), cs2 = ss / max(wsum, 1e-6);\n"
+               "  vec3 cg = mix(sg / max(wg, 1e-6), sm / max(wm, 1e-6), mf), cs2 = ss / max(wsum, 1e-6);\n"
                "  float conf = clamp(wg, 0.0, 1.0);\n"
                "  vec3 cur = mix(cs2, cg, smoothstep(0.05, pc.d.y > 0.0 ? pc.d.y : 0.6, conf));\n"
-               "  vec4 mda4 = textureLod(MotionDepthClip, uv, 0.0);\n"
                "  vec3 mda = mda4.xyz;\n"
                "  vec2 puv = uv - 0.5 * mda.xy;\n"
-               "  float mlen = length(0.5 * mda.xy * os);\n"
-               // (the depth clip only as far as the pixel moves: at rest a silhouette stands out every frame, alternating)
+               // (g.x = 1, GSR 2's depth clip: only as far as the pixel moves - at rest a silhouette stands out every frame,
+               // alternating. g.x = 0: the disocclusion below instead)
                "  mda.z *= clamp(mlen * 0.5, 0.0, 1.0);\n"
                "  if (pc.d.w < 0.0) { o = vec4(clamp(abs(0.5 * mda.xy * os) * 64.0, 0.0, 1.0), 0.0, 1.0); return; }\n"
                "  bool off = any(lessThan(puv, vec2(0.0))) || any(greaterThan(puv, vec2(1.0)));\n"
                "  if (pc.d.z > 0.5 || off) { o = vec4(cs2, 0.0); return; }\n"
-               "  vec3 hy = ycc(hist(puv));\n"
+               "  vec3 hl, hy = ycc(hist(puv, hl));\n"
+               "  hl = ycc(hl);\n"
                // (the stability level where the pixel was - the history's alpha)
                "  float sp = textureLod(PrevOutput, puv, 0.0).a;\n"
-               // (the previous frame's motion where this pixel was: changed by over half a pixel - another object's - less
-               // history, a narrower box)
+               // (the previous frame's motion where this pixel was: changed by over half a pixel more than its
+               // neighbours' - another object's - less history, a narrower box. Against the neighbours: the camera
+               // speeding up or slowing down changes every pixel's motion alike and cut the whole history; another
+               // object's edge changes it here and not a little way off. The neighbours as far as the change itself, so a
+               // revealed strip's lie outside it)
                "  vec4 pm = textureLod(PrevMda, puv, 0.0);\n"
-               "  float rj = smoothstep(0.5, 2.0, length(0.5 * (mda4.xy - pm.xy) * os));\n"
+               "  vec2 dlt = 0.5 * (mda4.xy - pm.xy) * os;\n"
+               "  float rad = clamp(length(dlt), 2.0, 16.0), pdif = 0.0;\n"
+               "  for (int n = 0; n < 4; n++) {\n"
+               "    vec2 nuv = uv + vec2(n == 0 ? rad : n == 1 ? -rad : 0.0, n == 2 ? rad : n == 3 ? -rad : 0.0) * pc.b.zw;\n"
+               "    vec2 nm = textureLod(MotionDepthClip, nuv, 0.0).xy;\n"
+               "    vec2 npm = textureLod(PrevMda, nuv - 0.5 * nm, 0.0).xy;\n"
+               "    pdif = max(pdif, length(dlt - 0.5 * (nm - npm) * os));\n"
+               "  }\n"
+               "  float rj = smoothstep(0.5, 2.0, pdif);\n"
+               // (the disocclusion, g.x = 0: where the pixel was, the previous frame's surfaces - even the farthest of the
+               // four around it - nearer than this one, and moving otherwise than it: it was hidden behind something that
+               // moved away. A turn of the camera, a still scene, or a thin line the jitter hits one frame and misses the
+               // next keep the history - GSR 2's depth clip cut it at every depth edge as soon as anything moved)
+               "  if (pc.g.x < 0.5) {\n"
+               "    vec4 pn = textureGather(PrevMda, puv, 3);\n"
+               "    float np = min(min(pn.x, pn.y), min(pn.z, pn.w)), nc = mda4.w;\n"
+               "    float nearer = np > 1e-7 ? smoothstep(0.03, 0.15, 1.0 - nc / np) : 0.0;\n"
+               "    mda.z = nearer * smoothstep(0.25, 1.0, pdif);\n"
+               "  }\n"
                // (the share of the image that changed against its history - x2_change.frag's one pixel)
                "  float gch = smoothstep(0.2, 0.5, texelFetch(Change, ivec2(0), 0).r);\n"
                "  float rest = pc.d.w > 0.0 ? pc.d.w : 1.5;\n"
-               "  float gam = mix(rest, 0.9, clamp(mlen * 0.25, 0.0, 1.0)) * (1.0 - 0.5 * mda.z);\n"
+               "  float gam = mix(rest, pc.g.y > 0.0 ? pc.g.y : 0.9, clamp(mlen * 0.25, 0.0, 1.0)) * (1.0 - 0.5 * mda.z);\n"
                "  gam = mix(gam, 1.5 * rest, lockf);\n"
                "  gam *= 1.0 - 0.6 * rj;\n"
                // (stable and at rest, a wider box - the jittered samples' own spread no longer cuts the history)
                "  gam *= 1.0 + 0.35 * sp * (1.0 - clamp(mlen, 0.0, 1.0));\n"
                // (moving: the box mean +- gamma sigma within the samples' own range - min / max, as far as the pixel moves)
                "  vec3 blo = m1 - gam * sig, bhi = m1 + gam * sig;\n"
-               "  float mm = clamp(mlen * 0.5, 0.0, 1.0);\n"
+               "  float mm = pc.g.z * clamp(mlen * 0.5, 0.0, 1.0);\n"
                "  blo = mix(blo, max(blo, ymn), mm); bhi = mix(bhi, min(bhi, ymx), mm);\n"
                "  vec3 bc = 0.5 * (blo + bhi), ext3 = 0.5 * (bhi - blo) + vec3(1.0 / 255.0);\n"
-               "  vec3 dir = hy - bc;\n"
+               // (f.w = 1: the box against the history's low frequencies - the jittered samples' aliasing of fine detail no
+               // longer counts as a change - the clip moving those alone; the detail above them kept, fading as the low
+               // ones fall far out: a real change, the detail stale as well. Else the whole history clipped, in motion
+               // toward one aliased frame)
+               "  vec3 hc = pc.f.w > 0.5 ? hl : hy;\n"
+               "  vec3 dir = hc - bc;\n"
                "  vec3 ad = abs(dir) / ext3;\n"
                "  float t = max(ad.x, max(ad.y, ad.z));\n"
-               "  if (t > 1.0) hy = bc + dir / t;\n"
-               "  float base = mix(mix(0.2, pc.d.x > 0.0 ? pc.d.x : 0.035, sp), 0.3, clamp(mlen * 0.125, 0.0, 1.0));\n"
-               "  float a = base * mix(pc.b.x > 0.0 ? pc.b.x : 0.6, pc.b.y > 0.0 ? pc.b.y : 1.4, smoothstep(0.05, 0.8, conf));\n"
+               "  vec3 hcc = t > 1.0 ? bc + dir / t : hc;\n"
+               "  hy = pc.f.w > 0.5 ? hcc + (hy - hl) * (1.0 - smoothstep(1.0, 2.5, t)) : hcc;\n"
+               // (moving: f.x of the new frame (0.3 before: the pixels a sample landed near took up to 90 % of it, their
+               // neighbours almost none - the render grid as a stipple), and less contrast between them - f.z for b.y)
+               "  float base = mix(mix(0.2, pc.d.x > 0.0 ? pc.d.x : 0.035, sp), pc.f.x > 0.0 ? pc.f.x : 0.3, clamp(mlen * 0.125, 0.0, 1.0));\n"
+               "  float sn = pc.b.y > 0.0 ? pc.b.y : 1.4;\n"
+               "  if (pc.f.z > 0.0) sn = mix(sn, pc.f.z, mf);\n"
+               "  float a = base * mix(pc.b.x > 0.0 ? pc.b.x : 0.6, sn, smoothstep(0.05, 0.8, conf));\n"
+               // (g.w, the frame weight: the user's persistence - the reactions below still take over where something changed)
+               "  a = clamp(a * (pc.g.w > 0.0 ? pc.g.w : 1.0), 0.0, 1.0);\n"
                "  a = mix(a, 0.6, mda.z);\n"
                // the reaction (e.x): the history outside the samples' range by t - something changed - the new frame by it
                // (with much of the image changed the reaction goes further: the new frame up to 0.95 - gch)
@@ -1257,6 +1306,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(set = 0, binding = 0) uniform sampler2D t0;\n"
                "layout(set = 0, binding = 1) uniform sampler2D t1;\n"
                "layout(set = 0, binding = 2) uniform sampler2D m;\n"
+               "layout(set = 0, binding = 3) uniform sampler2D mv;\n"
                "layout(location = 0) out vec4 o;\n"
                "vec3 tap(ivec2 p) { return texelFetch(t0, clamp(p, ivec2(0), ivec2(pc.b.xy) - 1), 0).rgb; }\n"
                "vec3 cr(vec2 uv) {\n"
@@ -1272,17 +1322,17 @@ static const char *builtin_src(const char *name, int *stage) {
                "}\n"
                "void main() {\n"
                "  ivec2 ip = ivec2(gl_FragCoord.xy);\n"
-               "  vec3 a = tap(ip + ivec2(-1, -1)), b = tap(ip + ivec2(0, -1)), c = tap(ip + ivec2(1, -1));\n"
-               "  vec3 d = tap(ip + ivec2(-1, 0)), e = tap(ip), f = tap(ip + ivec2(1, 0));\n"
-               "  vec3 g = tap(ip + ivec2(-1, 1)), h = tap(ip + ivec2(0, 1)), i = tap(ip + ivec2(1, 1));\n"
-               "  vec3 blur = (4.0 * e + 2.0 * (b + d + f + h) + (a + c + g + i)) / 16.0, det = e - blur;\n"
                "  vec2 uv = gl_FragCoord.xy * pc.b.zw;\n"
-               "  vec3 r = e + (dot(det, vec3(0.25, 0.5, 0.25)) < 0.0 ? pc.a.x : pc.a.y) * det;\n"
-               "  vec3 mn = min(min(min(a, b), min(c, d)), min(min(e, f), min(min(g, h), i)));\n"
-               "  vec3 mx = max(max(max(a, b), max(c, d)), max(max(e, f), max(max(g, h), i)));\n"
-               "  r = clamp(r, max(mn - pc.a.z * (mx - mn), 0.0), mx);\n"
-               "  float k = pc.a.w > 0.5 ? texture(m, uv).r : 0.0;\n"
-               "  o = vec4(k > 0.0 ? mix(r, cr(uv), k) : r, 1.0);\n"
+               "  vec4 c4 = texelFetch(t0, ip, 0);\n"
+               "  vec3 c = c4.rgb, n = tap(ip + ivec2(0, -1)), s = tap(ip + ivec2(0, 1)), w = tap(ip + ivec2(-1, 0)), e = tap(ip + ivec2(1, 0));\n"
+               "  float mlen = length(0.5 * textureLod(mv, uv, 0.0).xy * pc.b.xy);\n"
+               "  float k = pc.a.x * (1.0 - clamp(mlen * 0.5, 0.0, 1.0)) * (0.5 + 0.5 * c4.a);\n"
+               "  vec3 mn = min(c, min(min(n, s), min(w, e))), mx = max(c, max(max(n, s), max(w, e)));\n"
+               "  vec3 amp = sqrt(clamp(min(mn, 1.0 - mx) / max(mx, vec3(1e-4)), 0.0, 1.0));\n"
+               "  vec3 wgt = -amp * k;\n"
+               "  vec3 r = clamp((c + wgt * (n + s + w + e)) / (1.0 + 4.0 * wgt), 0.0, 1.0);\n"
+               "  float ki = pc.a.w > 0.5 ? texture(m, uv).r : 0.0;\n"
+               "  o = vec4(ki > 0.0 ? mix(r, cr(uv), ki) : r, 1.0);\n"
                "}\n";
     }
     // x2_change.frag (DittoSR's fast settling, exec.c gsr2_run): a.x = 0, a 4 x 4 image (R16F),

@@ -71,7 +71,10 @@ typedef struct {
     bool mv_debug;        // (not saved) the scene shows its camera motion vectors (runtime/nvn/vulkan/exec.c scene_hook)
     bool mv_objects;      // per-object motion vectors (characters' own motion) when motion vectors are in use (default on)
     float taa_sharpness;  // TAA: RCAS sharpening at the present, 0..1 (default 0.5)
-    float fsr3_sharpness; // FSR 3.1: its RCAS sharpening (AMD's robust CAS), 0..1 (default 0.5; graphics page, under its mode)
+    float fsr3_sharpness; // FSR 3.1: its RCAS sharpening (AMD's robust CAS), 0..1 (default 0.5; graphics page, under its mode);
+                          // DittoSR: its contrast-adaptive sharpening where the image holds still (exec.c x2_final.frag)
+    float dittosr_frame_weight; // DittoSR: x the new frame's share, 0.25..4 (default 3): lower, more persistence - smoother,
+                                // blurrier in motion; higher, more responsive - crisper, more shimmer (larecomp.ini only)
     int fsr3_preset;      // FSR3_*: with a temporal upscaler, the render resolution (default FSR3_QUALITY)
     int frame_gen;        // frame generation: 0 off, FG_AUTO, 2 / 3 / 4 images per world frame (exec.c frame interpolation, any GPU)
     int fg_method;        // FG_RERENDER / FG_FLOW: how its in-between images are made (F12 advanced tab; live)
